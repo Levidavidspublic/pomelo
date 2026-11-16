@@ -1,0 +1,10 @@
+{
+  "status": "OWNER_AUTHORIZED_BUILD",
+  "build_authorized": true,
+  "owner_instruction": "Okay, I want you to build it. It's not Pamela, it's Pomelo, the fruit.",
+  "recorded_utc": "2026-11-16T06:03:50.574577+00:00",
+  "prior_plan_seal_sha256": "72e70dd55a2af9555b789b2b26154a3dec23fe610a65e89a97470293c074e07d",
+  "feature_contract_count": 284,
+  "feature_contract_sha256": "e98a1ea9d9d89c352d4d2676e2450055597de56d27108f83908fcaa38d900f36",
+  "authorization_scope": "Build the reviewed full-scope project, with naming corrected to Pomelo. Existing owner constraints, provider entitlement, spending and human-only actions remain. No implementation acceptance is inferred."
+}
