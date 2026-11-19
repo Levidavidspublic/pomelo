@@ -50,6 +50,12 @@ Supersedes the teal palette and the "no glass layers" line in `docs/design.md` o
 | Voice mode | Full-screen. A calm waveform reacts to speech only and stays still otherwise. Large stop button. Interrupt by talking. |
 | Settings | Plain lists. Driver accounts show the signed-in name, never tokens. Secrets show only SET or UNSET. |
 
+## 3b. Agent personas: the noir cast (A-19)
+
+- Each agent persona (Researcher, Tutor, Companion…) has a black-and-white oil portrait with canvas grain, borrowed from OmniAgent's Noir Edition pack, with an italic serif name (Instrument Serif, EXTRAPOLATED font).
+- Where it shows: a portrait card when you pick a persona, a round avatar on sub-agent rows and the model pill, the voice-mode orb, and about 6% behind the thread as a backdrop.
+- Paintings are original adult characters with no readable text (OmniAgent rules PA1–PA4). OmniAgent's mascot, Liberty Leary, stays OmniAgent's and is not used in Pomelo.
+
 ## 4. Accessibility (carried, required)
 
 - WCAG 2.2 AA. Text contrast at least 4.5:1, also measured over glass with the worst-case background.
