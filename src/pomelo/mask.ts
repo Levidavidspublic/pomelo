@@ -39,11 +39,16 @@ const escapePattern = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]
 
 function textMask(known: readonly string[]): (text: string) => string {
   const patterns: { length: number; pattern: string }[] = [];
+  const queryUrl = new URL("https://example.invalid");
   for (const value of new Set(known)) {
     if (!/^.{2}/su.test(value) || value.trim() === "") continue;
     patterns.push({ length: value.length, pattern: escapePattern(value) });
+    const urlValue = toUSVString(value);
     const formValue = new URLSearchParams([["", value]]).toString().slice(1);
-    for (const encoded of new Set([encodeURIComponent(toUSVString(value)), formValue])) {
+    // A browser URL's query keeps characters such as + and @ that form and component encoding escape.
+    queryUrl.search = `?=${urlValue}`;
+    const browserValue = queryUrl.search.slice(2);
+    for (const encoded of new Set([encodeURIComponent(urlValue), encodeURI(urlValue), formValue, browserValue])) {
       if (encoded === value) continue;
       // Hex digits in percent escapes are case-insensitive. The rest of the value stays case-sensitive.
       const pattern = escapePattern(encoded).replace(/%[0-9A-F]{2}/g, (escape) =>
@@ -58,7 +63,18 @@ function textMask(known: readonly string[]): (text: string) => string {
   patterns.sort((a, b) => b.length - a.length);
   const pattern = [escapePattern(MASK), escapePattern(HIDDEN), ...patterns.map((entry) => entry.pattern)].join("|");
   const secrets = new RegExp(pattern, "g");
-  return (text) => hideSecrets(text.replace(secrets, (match) => match === HIDDEN ? HIDDEN : MASK)).text;
+  return (text) => {
+    let masked = "";
+    let maskedThrough = 0;
+    for (let match = secrets.exec(text); match; match = secrets.exec(text)) {
+      if (match[0] === MASK || match[0] === HIDDEN) continue;
+      if (match.index >= maskedThrough) masked += text.slice(maskedThrough, match.index) + MASK;
+      maskedThrough = Math.max(maskedThrough, secrets.lastIndex);
+      // A value starting inside this match may extend past its end.
+      secrets.lastIndex = match.index + 1;
+    }
+    return hideSecrets(masked + text.slice(maskedThrough)).text;
+  };
 }
 
 export function maskText(text: string, known: readonly string[]): string {
@@ -108,16 +124,20 @@ export function maskAnswer(answer: BrowserAnswerWithFields, known: readonly stri
   if (fields) masked.fields = walkTree(fields, redact);
   if (content) {
     const fieldBoxes = fields?.flatMap((field) => {
-      if (!field.box || (!isSecretField(field) && field.value !== MASK)) return [];
-      const { x, y, width, height } = field.box;
-      return [{ x, y, width, height }];
+      const { box, value } = field;
+      if (!box) return [];
+      const { x, y, width, height } = box;
+      if (![x, y, width, height].every(Number.isFinite)) return [];
+      const maskedValue = typeof value === "string" ? redact(value) : "";
+      return isSecretField(field) || maskedValue.includes(MASK) || maskedValue.includes(HIDDEN) ? [{ x, y, width, height }] : [];
     }) ?? [];
     masked.content = content.map((block) => {
       if (!block || typeof block !== "object" || !("type" in block) || block.type !== "image") return walkTree(block, redact);
 
-      const { type, data, ...metadata } = block as { type: "image"; data?: string };
-      // Base64 is an opaque image payload for the later pixel pass.
-      return { type, ...walkTree(metadata, redact), data, needsRegionMask: true, fieldBoxes };
+      const { type, data, ...metadata } = block as { type: "image"; data?: unknown };
+      // The later pixel pass handles base64 payloads.
+      const maskedData = typeof data === "string" ? data : walkTree(data, redact);
+      return { type, ...walkTree(metadata, redact), data: maskedData, needsRegionMask: true, fieldBoxes };
     });
   }
   return masked;

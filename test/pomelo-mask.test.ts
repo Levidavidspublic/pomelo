@@ -4,22 +4,25 @@ import { readOutput } from "../src/browser-driver.js";
 import { MASK, maskAnswer, maskField, maskText, maskTree } from "../src/pomelo/mask.js";
 import { HIDDEN } from "../src/secrets.js";
 
-const canary = "FAKE POMELO+MASK@CANARY";
+const canary = "FAKE POMELO+MASK@CANARY'END";
 const known = Object.freeze([canary]);
 const encodedCanary = encodeURIComponent(canary);
+const uriCanary = encodeURI(canary);
 const formQuery = new URLSearchParams({ lookup: canary }).toString();
 const pageUrl = "https://example.invalid/?lookup=";
+const browserUrl = new URL(`${pageUrl}${canary}`).href;
+const browserCanary = browserUrl.slice(pageUrl.length);
 
 test("the planted canary disappears from page reads, field values, the accessibility tree and the answer", () => {
   const page = Object.freeze({
     title: "Example page",
-    url: `${pageUrl}${encodedCanary}`,
+    url: `${browserUrl}&uri=${uriCanary}&component=${encodedCanary}`,
     text: `Page text contains ${canary}`,
     cut: false,
     items: Object.freeze([`[1] Item label ${canary}`]),
     fields: Object.freeze([Object.freeze({ name: "lookup", type: "text", value: canary, filledByBroker: true })]),
     accessibility: Object.freeze({ children: Object.freeze([{ role: "group", children: [{ role: "text", name: canary }] }]) }),
-    pagesByUrl: Object.freeze({ [`${pageUrl}${encodedCanary}`]: { title: "Example page" }, [canary]: true }),
+    pagesByUrl: Object.freeze({ [browserUrl]: { title: "Example page" }, [canary]: true }),
   });
   const answer = {
     output: readOutput({ ...page, items: [...page.items] }),
@@ -32,12 +35,13 @@ test("the planted canary disappears from page reads, field values, the accessibi
   const maskedAnswer = maskAnswer(answer, known);
   for (const result of [maskField(page.fields[0]), maskText(page.text, known), snapshot, maskedAnswer]) {
     const json = JSON.stringify(result);
-    assert.ok(!json.includes(canary));
-    assert.ok(!json.includes(encodedCanary));
+    for (const value of [canary, browserCanary, uriCanary, encodedCanary]) {
+      assert.ok(!json.includes(value), "the serialized output must not contain any form of the canary");
+    }
   }
   assert.deepEqual(snapshot, {
     ...page,
-    url: `${pageUrl}${MASK}`,
+    url: `${pageUrl}${MASK}&uri=${MASK}&component=${MASK}`,
     text: `Page text contains ${MASK}`,
     items: [`[1] Item label ${MASK}`],
     fields: [{ ...page.fields[0], value: MASK }],
@@ -45,7 +49,7 @@ test("the planted canary disappears from page reads, field values, the accessibi
     pagesByUrl: { [`${pageUrl}${MASK}`]: { title: "Example page" }, [MASK]: true },
   });
   assert.deepEqual(maskedAnswer, {
-    output: answer.output.replaceAll(canary, MASK).replaceAll(encodedCanary, MASK),
+    output: readOutput({ ...snapshot, items: [...snapshot.items] }),
     content: [{ type: "text", text: `${snapshot.text}\n${snapshot.url}` }],
     isError: false,
     pagesByUrl: snapshot.pagesByUrl,
@@ -82,15 +86,21 @@ test("registered values are literal, case-sensitive, and ignore empty, one-chara
   assert.equal(maskText(expected, registered), expected);
 });
 
-test("query encoding masks form values and lowercase hex escapes while preserving the case of the value", () => {
+test("query masking covers browser, URI, component and form encoding without changing the value's case", () => {
   const lowerHex = encodedCanary.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
   const wrongCase = encodeURIComponent(canary.toLowerCase());
-  const query = `${formQuery}&lowerHex=${lowerHex}&wrongCase=${wrongCase}`;
+  const query = `${formQuery}&browser=${browserCanary}&uri=${uriCanary}&lowerHex=${lowerHex}&wrongCase=${wrongCase}`;
   const masked = maskText(query, known);
-  assert.ok(!masked.includes(formQuery));
-  assert.ok(!masked.includes(lowerHex));
-  assert.equal(masked, `lookup=${MASK}&lowerHex=${MASK}&wrongCase=${wrongCase}`);
+  assert.ok(masked === `lookup=${MASK}&browser=${MASK}&uri=${MASK}&lowerHex=${MASK}&wrongCase=${wrongCase}`);
   assert.equal(maskText(masked, known), masked);
+});
+
+test("overlapping registered values are fully masked regardless of registration order", () => {
+  for (const registered of [["abc", "bcdef", "efgh"], ["efgh", "bcdef", "abc"]]) {
+    const masked = maskText("prefix abcdefgh abcabc suffix", registered);
+    assert.ok(masked === `prefix ${MASK} ${MASK}${MASK} suffix`);
+    assert.equal(maskText(masked, registered), masked);
+  }
 });
 
 test("Friday's text shield runs after registered values are masked", () => {
@@ -122,17 +132,19 @@ test("deep and wide acyclic trees are masked without changing their input", () =
 test("images carry the secret field boxes for later pixel masking", () => {
   const passwordBox = Object.freeze({ x: 10, y: 20, width: 100, height: 24 });
   const brokerBox = Object.freeze({ x: 10, y: 50, width: 100, height: 24 });
+  const registeredBox = Object.freeze({ x: 10, y: 110, width: 100, height: 24 });
   const fields = Object.freeze([
     { name: "login", type: "password", box: passwordBox },
     { name: "lookup", type: "text", value: canary, filledByBroker: true, box: brokerBox },
     { name: "verification", autocomplete: "one-time-code" },
     { name: "search", type: "text", box: { x: 10, y: 80, width: 100, height: 24 } },
+    { name: "registered", type: "text", value: `prefix ${canary}`, box: registeredBox },
   ]);
   const image = Object.freeze({ type: "image", mimeType: "image/png", data: "RklYVFVSRQ==" });
   const content = [image, { type: "text", text: canary }];
   const masked = maskAnswer({ output: "", fields, content }, known);
   assert.deepEqual(masked.content, [
-    { ...image, needsRegionMask: true, fieldBoxes: [passwordBox, brokerBox] },
+    { ...image, needsRegionMask: true, fieldBoxes: [passwordBox, brokerBox, registeredBox] },
     { type: "text", text: MASK },
   ]);
   assert.ok(!JSON.stringify(masked).includes(canary));
@@ -140,6 +152,20 @@ test("images carry the secret field boxes for later pixel masking", () => {
   assert.deepEqual(maskAnswer({ output: "", content: [image] }, []).content, [
     { ...image, needsRegionMask: true, fieldBoxes: [] },
   ]);
+});
+
+test("image annotations mask structured data and only return boxes with finite coordinates", () => {
+  const image = { type: "image", data: { [canary]: [canary] } };
+  const fields = [
+    { type: "password", box: { x: 10, y: 20, width: canary as unknown as number, height: 24 } },
+    { type: "password", box: { x: Infinity, y: 20, width: 100, height: 24 } },
+  ];
+  const masked = maskAnswer({ output: "", fields, content: [image] }, known);
+  assert.ok(!JSON.stringify(masked).includes(canary));
+  assert.deepEqual(masked.content, [
+    { type: "image", data: { [MASK]: [MASK] }, needsRegionMask: true, fieldBoxes: [] },
+  ]);
+  assert.deepEqual(maskAnswer(masked, known), masked);
 });
 
 test("there is no masking-off argument", () => {
