@@ -12,9 +12,10 @@ const REDACTIONS = [
   { pattern: /(["'`])op:\/\/[^\r\n]*?\1/gi, replacement: `$1${NET_MASK}$1` },
   { pattern: /\bop:\/\/[^\s<>"'`]+/gi, replacement: NET_MASK },
   { pattern: /\b((?:set-)?cookie\s*:\s*)[^\r\n]+/gi, replacement: `$1${NET_MASK}` },
-  // Preserve the host, path and any fragment text before a question mark.
-  { pattern: /(\/\/[^\s<>"'`?]*)\?[^\s<>"'`#]*(#[^\s<>"'`?]*)?(?:\?[^\s<>"'`]*)?/g, replacement: "$1$2" },
 ];
+
+const URL_PATH = /\/|[\p{L}\p{N}-]\.[\p{L}\p{N}-]/u;
+const QUERY_PARAMETER = /^[\w.%~-]+=/;
 
 export interface JobNoteInput {
   id: string;
@@ -34,7 +35,21 @@ export type JobPhoneNote = Pick<PushNote, "title" | "body" | "sid"> & {
 };
 
 function stripSensitiveParts(text: string): string {
-  return REDACTIONS.reduce((value, { pattern, replacement }) => value.replace(pattern, replacement), text);
+  const redacted = REDACTIONS.reduce((value, { pattern, replacement }) => value.replace(pattern, replacement), text);
+  // Quotes can occur inside a query. Only whitespace and angle brackets delimit links here.
+  return redacted.replace(/[^\s<>]+/g, (word) => {
+    const question = word.indexOf("?");
+    if (question === -1) return word;
+
+    const path = word.slice(0, question);
+    const query = word.slice(question + 1);
+    // A parameterized query can also follow a single-segment path or stand alone.
+    if (!URL_PATH.test(path) && !QUERY_PARAMETER.test(query)) return word;
+
+    const hash = query.indexOf("#");
+    const fragment = hash === -1 ? "" : query.slice(hash).split("?", 1)[0];
+    return path + fragment;
+  });
 }
 
 function safeText(text: string, known: readonly string[]): string {

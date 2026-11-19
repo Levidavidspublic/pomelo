@@ -80,6 +80,25 @@ test("URLs in the title and result keep their host and path and lose their query
   assert.equal(note?.body, "Done on the VPS: Opened https://site.example/path and https://site.example/next#item");
 });
 
+test("quotes inside query values do not expose the rest of the query", () => {
+  for (const quote of ["'", '"', "`"]) {
+    const link = `https://site.example/p?name=o${quote}brien&token=abc`;
+    const note = jobPhoneNote({ ...job, threadTitle: `From <${link}>`, result: `Opened ${link} twice` }, []);
+    assert.equal(note?.title, "From <https://site.example/p>");
+    assert.equal(note?.body, "Done on the VPS: Opened https://site.example/p twice");
+  }
+});
+
+test("bare hosts and relative paths lose their query too", () => {
+  const note = jobPhoneNote({
+    ...job,
+    threadTitle: "From site.example/path?token=abc",
+    result: "Opened /cb?code=abc then ../docs/intro?raw and callback?code=abc",
+  }, []);
+  assert.equal(note?.title, "From site.example/path");
+  assert.equal(note?.body, "Done on the VPS: Opened /cb then ../docs/intro and callback");
+});
+
 test("a secret spanning a URL's question mark cannot expose the remaining query", () => {
   const marker = "?first=fixture";
   const note = jobPhoneNote({ ...job, result: `https://site.example/path${marker}&second=detail?extra` }, [marker]);
