@@ -18,6 +18,7 @@ import { early, openEarlySocket } from "./early.js";
 import { socketUrl } from "./useSession.js";
 import { refreshToolLimits } from "./toolLimits.js";
 import { api } from "./api.js";
+import { keepThreadMeta } from "./pomelo/thread-meta-store.js";
 import { Code } from "./Code.js";
 /** A prompt link that arrived signed out, kept for this tab until sign-in brings them back (App). */
 const PROMPT_LINK_KEY = "friday.prompt-link";
@@ -249,6 +250,7 @@ export function App() {
       // The page asked already, while the app loaded; if that came back empty-handed (it asked before knowing who you were), ask again.
       ((first && early<Mine>("mine")) || Promise.resolve(null))
         .then((r) => r ?? api<Mine>(identity, "/api/sessions/mine"))
+        .then((r) => (keepThreadMeta(r.sessions), r))
         .then((r) =>
           setRecents((prev) => {
             const known = new Set(prev.map((x) => x.sid));
