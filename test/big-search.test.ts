@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { readRepo } from "../src/runner/repo-read.js";
+import { readRepo, SEARCH } from "../src/runner/repo-read.js";
 
 /**
  * Searching a big project has to look at all of it. It used to read the first
@@ -16,10 +16,14 @@ const fill = async (dir: string, n: number, needleAt: number) => {
   for (let i = 0; i < n; i++) await writeFile(path.join(dir, "src", `m${String(i).padStart(4, "0")}.ts`), i === needleAt ? "export const x = 'zebra-needle';\n" : `export const v${i} = ${i};\n`);
 };
 
-test("in a plain folder of a thousand files, a match in the last of them is found", { timeout: 60_000 }, async (t) => {
+// Allow time for fixture creation in addition to the 60-second search budget.
+test("in a plain folder of a thousand files, a match in the last of them is found", { timeout: 90_000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "friday-search-"));
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   await fill(dir, 1000, 999);
+  const previousSearchMs = SEARCH.ms;
+  t.after(() => { SEARCH.ms = previousSearchMs; });
+  SEARCH.ms = 60_000;
   const out = await readRepo(dir, { op: "search", query: "ZEBRA-needle", mode: "plan" });
   assert.match(out, /1 matches/);
   assert.match(out, /src\/m0999\.ts:1:/);
