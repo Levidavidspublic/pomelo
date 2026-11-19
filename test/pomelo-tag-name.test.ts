@@ -3,11 +3,17 @@ import test from "node:test";
 import { cleanTagName, matchTagName } from "../src/pomelo/tag-name.js";
 
 test("tag keys ignore case, surrounding spaces and separator differences", () => {
-  for (const [raw, label] of [["Pomelo", "Pomelo"], [" pomelo ", "pomelo"], ["POMELO", "POMELO"]]) {
+  for (const [raw, label] of [
+    ["Pomelo", "Pomelo"], [" pomelo ", "pomelo"], ["POMELO", "POMELO"],
+    ["-pomelo", "-pomelo"], ["pomelo_", "pomelo_"],
+  ]) {
     assert.deepEqual(cleanTagName(raw), { ok: true, label, key: "pomelo" });
   }
   for (const label of ["tempo flow", "tempo-flow", "Tempo_Flow", "Tempo -_ Flow"]) {
     assert.deepEqual(cleanTagName(label), { ok: true, label, key: "tempo-flow" });
+  }
+  for (const raw of ["tempo\tflow", "tempo\nflow"]) {
+    assert.deepEqual(cleanTagName(raw), { ok: true, label: "tempo flow", key: "tempo-flow" });
   }
 });
 
@@ -55,7 +61,10 @@ test("tag names refuse empty or non-text inputs", () => {
 
 test("tag names refuse token-shaped inputs without returning the supplied text", () => {
   const sample = "demo" + "A1".repeat(8);
-  for (const raw of [sample, "s\u200Bk" + "-demo", "ghp" + "_demo", "op" + "://demo"]) {
+  for (const raw of [
+    sample, "notes " + sample, sample + "_x", "notes ".repeat(5) + sample,
+    "s\u200Bk" + "-demo", "ghp" + "_demo", "op" + "://demo",
+  ]) {
     assert.deepEqual(cleanTagName(raw), { ok: false, reason: "looks-secret" });
     assert.deepEqual(matchTagName(raw, []), { kind: "refused", reason: "looks-secret" });
   }
