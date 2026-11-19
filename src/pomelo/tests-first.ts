@@ -8,6 +8,7 @@ function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
+/** For renames, `path` is the destination and `previousPath` is required. A missing source path is reported as a problem. */
 export function checkTestsFirst(changes: readonly Change[]): {
   ok: boolean;
   problems: string[];
@@ -20,23 +21,26 @@ export function checkTestsFirst(changes: readonly Change[]): {
 
   for (const change of changes) {
     const path = normalizePath(change.path);
-    if (change.status === "added" || change.status === "modified") {
-      if (path.startsWith("src/pomelo/") || path.startsWith("src/client/pomelo/")) {
-        code.push(path);
-      } else if (pomeloTest.test(path)) {
-        tests.push(path);
+    if (change.status === "deleted") {
+      if (pomeloTest.test(path)) {
+        problems.push(`The Pomelo test ${JSON.stringify(path)} was deleted.`);
       }
-    } else if (change.status === "deleted" && pomeloTest.test(path)) {
-      problems.push(`The Pomelo test ${JSON.stringify(path)} was deleted.`);
-    } else if (change.status === "renamed") {
-      // In a path-only rename, path identifies the original test.
-      const original = change.previousPath === undefined ? path : normalizePath(change.previousPath);
-      if (!pomeloTest.test(original)) continue;
-      if (change.previousPath === undefined) {
-        problems.push(`The Pomelo test ${JSON.stringify(original)} was renamed without a destination path.`);
-      } else if (!pomeloTest.test(path)) {
-        problems.push(`The Pomelo test ${JSON.stringify(original)} was renamed outside the test pattern.`);
+      continue;
+    }
+
+    if (path.startsWith("src/pomelo/") || path.startsWith("src/client/pomelo/")) {
+      code.push(path);
+    }
+
+    if (change.status === "renamed") {
+      const previousPath = normalizePath(change.previousPath ?? "");
+      if (!previousPath) {
+        problems.push(`The rename to ${JSON.stringify(path)} needs a previous path.`);
+      } else if (pomeloTest.test(previousPath) && !pomeloTest.test(path)) {
+        problems.push(`The Pomelo test ${JSON.stringify(previousPath)} was renamed outside the test pattern.`);
       }
+    } else if (pomeloTest.test(path)) {
+      tests.push(path);
     }
   }
 

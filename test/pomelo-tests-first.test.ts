@@ -75,12 +75,23 @@ test("a Pomelo test renamed outside the pattern is reported by its original path
   assert.match(result.problems[0], /test\/pomelo-check\.test\.ts/);
 });
 
-test("a rename reported with only its original Pomelo test path is flagged", () => {
+test("a rename without a previous path is flagged when its destination matches the test pattern", () => {
   const result = checkTestsFirst([{ path: "test/pomelo-check.test.ts", status: "renamed" }]);
 
   assert.equal(result.ok, false);
   assert.equal(result.problems.length, 1);
   assert.match(result.problems[0], /test\/pomelo-check\.test\.ts/);
+});
+
+test("a rename without a previous path is flagged even when its destination is outside the test pattern", () => {
+  const result = checkTestsFirst([{ path: ".\\test\\check.test.ts", status: "renamed" }]);
+
+  assert.deepEqual(result, {
+    ok: false,
+    problems: ['The rename to "test/check.test.ts" needs a previous path.'],
+    code: [],
+    tests: [],
+  });
 });
 
 test("renames within or into the Pomelo test pattern do not count as added or modified tests", () => {
@@ -94,6 +105,28 @@ test("renames within or into the Pomelo test pattern do not count as added or mo
   assert.equal(result.ok, false);
   assert.equal(result.problems.length, 1);
   assert.match(result.problems[0], /src\/pomelo\/check\.ts/);
+});
+
+test("renames to server and client Pomelo code paths require an added or modified test", () => {
+  const renames = [
+    { path: "./src/pomelo/check.ts", previousPath: "src/shared/check.ts", status: "renamed" },
+    { path: ".\\src\\client\\pomelo\\view.tsx", previousPath: "src/client/view.tsx", status: "renamed" },
+    { path: "src/shared/model.ts", previousPath: "src/pomelo/model.ts", status: "renamed" },
+  ] as const;
+  const code = ["src/client/pomelo/view.tsx", "src/pomelo/check.ts"];
+  const result = checkTestsFirst(renames);
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.code, code);
+  assert.deepEqual(result.tests, []);
+  assert.equal(result.problems.length, code.length);
+  for (const [index, path] of code.entries()) {
+    assert.ok(result.problems[index].includes(path));
+  }
+  assert.deepEqual(checkTestsFirst([
+    ...renames,
+    { path: "test/pomelo-check.test.ts", status: "added" },
+  ]), { ok: true, problems: [], code, tests: ["test/pomelo-check.test.ts"] });
 });
 
 test("deleting Pomelo code alone passes", () => {
