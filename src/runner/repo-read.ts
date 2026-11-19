@@ -371,9 +371,7 @@ function gitSearch(base: string, rel: string, query: string): Promise<string[] |
 }
 
 /** How far a search through plain files goes: a lot of files, a fair time, and nothing huge. */
-const SEARCH_FILES = 25_000;
-const SEARCH_MS = 8_000;
-const SEARCH_MAX_BYTES = 1_000_000;
+export const SEARCH = { files: 25_000, ms: 8_000, maxBytes: 1_000_000 };
 
 async function search(base: string, query: string, rel: string): Promise<string> {
   if (!query.trim()) return "Give something to search for.";
@@ -388,13 +386,13 @@ async function search(base: string, query: string, rel: string): Promise<string>
   if (!hits.length) {
     // Not a repository (or git had nothing): look at the files, as far as time allows.
     const files: string[] = [];
-    await walk(base, dir, files, 12, SEARCH_FILES);
+    await walk(base, dir, files, 12, SEARCH.files);
     const wanted = files.filter((f) => readable(path.basename(f)));
     total = wanted.length;
     // A plain substring, case-insensitive: the agent asked for a string, not a
     // regex, and a regex it wrote badly would fail in ways it can't see.
     const needle = query.toLowerCase();
-    const until = Date.now() + SEARCH_MS;
+    const until = Date.now() + SEARCH.ms;
     // Sixteen at a time: one by one, a thousand small files on a busy machine took longer than the time allowed.
     const found = new Map<number, string[]>();
     let next = 0;
@@ -406,7 +404,7 @@ async function search(base: string, query: string, rel: string): Promise<string>
         const full = path.join(base, f);
         // A link in the folder to a file outside it is listed, never opened.
         if (!within(base, f)) continue;
-        if (((await stat(full).catch(() => null))?.size ?? 0) > SEARCH_MAX_BYTES) continue;
+        if (((await stat(full).catch(() => null))?.size ?? 0) > SEARCH.maxBytes) continue;
         const text = await readFile(full, "utf8").catch(() => "");
         if (!text.toLowerCase().includes(needle)) continue;
         const lines: string[] = [];
@@ -442,7 +440,7 @@ async function search(base: string, query: string, rel: string): Promise<string>
     if (name && name.toLowerCase().includes(query.toLowerCase())) shown.push(`${m[1]}:${m[2]}: ${name}=<hidden>`);
   }
   hits.splice(0, hits.length, ...shown);
-  const partial = unread > 0 ? `${total - unread} of ${total} files searched before the time ran out (${SEARCH_MS / 1000}s); search a narrower path for the rest` : "";
+  const partial = unread > 0 ? `${total - unread} of ${total} files searched before the time ran out (${SEARCH.ms / 1000}s); search a narrower path for the rest` : "";
   if (!hits.length) return partial ? `No matches for "${query}" in the ${partial}.` : `No matches for "${query}".`;
   const more = hits.length >= MAX_MATCHES ? `\n\n[stopped at ${MAX_MATCHES} matches]` : partial ? `\n\n[${partial}]` : "";
   return `${hits.length} matches for "${query}":\n${hits.join("\n")}${more}`;
