@@ -31,6 +31,7 @@ export function cleanTagName(raw: unknown): CleanTagNameResult {
   if (!label) return { ok: false, reason: "empty" };
 
   const key = label.toLowerCase().replace(/[ _-]+/gu, "-").replace(/^-|-$/gu, "");
+  if (!key) return { ok: false, reason: "empty" };
 
   return { ok: true, label, key };
 }

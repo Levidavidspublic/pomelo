@@ -52,11 +52,14 @@ test("tag names discard combining marks without a base", () => {
 });
 
 test("tag names refuse empty or non-text inputs", () => {
-  for (const raw of ["", "   ", "\u200B\u202E", "\u05B0"]) {
+  for (const raw of ["", "   ", "\u200B\u202E", "\u05B0", "-", "_", "- _"]) {
     assert.deepEqual(cleanTagName(raw), { ok: false, reason: "empty" });
   }
   assert.deepEqual(cleanTagName(324), { ok: false, reason: "not-text" });
   assert.deepEqual(matchTagName("", []), { kind: "refused", reason: "empty" });
+  assert.deepEqual(matchTagName("-", [{ slug: "separator", label: "_" }]), {
+    kind: "refused", reason: "empty",
+  });
 });
 
 test("tag names refuse token-shaped inputs without returning the supplied text", () => {
