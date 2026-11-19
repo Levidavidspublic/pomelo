@@ -153,6 +153,7 @@ import { OutsideAgents } from "./outside-agents.js";
 import { outsideCommand, outsideSetup } from "./local/outside-mcp.js";
 import { openInTerminal } from "./runner/terminal.js";
 import { rankTools, taskTier } from "./routing.js";
+import { pomeloStore, sessionRowsWithMeta } from "./pomelo/session-rows.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Resolved once: the traversal guard in serveStatic compares against this with
@@ -5458,7 +5459,7 @@ export async function createApp(o: AppOptions) {
           }),
         )
       ).filter((s): s is NonNullable<typeof s> => !!s);
-      return json(res, 200, { sessions });
+      return json(res, 200, { sessions: await sessionRowsWithMeta(pomeloStore(redis), sessions) });
     }
 
     /**
