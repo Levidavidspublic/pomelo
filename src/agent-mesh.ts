@@ -832,6 +832,8 @@ export class AgentMesh {
 
   /** The app's own features for the agents (app-tools.ts APP_TOOLS: search_sessions, start_session, manage_automation). Set by the app. */
   appTools: { call(sid: string, lane: string, name: string, args: Record<string, unknown>): Promise<MeshResult> } | null = null;
+  /** Pomelo's thread tools: the tools to offer, and the call. Set by the app. */
+  pomelo: { tools: MeshToolDef[]; call(sid: string, lane: string, name: string, args: Record<string, unknown>): Promise<MeshResult | null> } | null = null;
   /** show_ui, cards drawn in the chat (gen-ui.ts), on this computer's Friday. Set by the app. */
   genUi: { tools: MeshToolDef[]; instructions: string; call(sid: string, lane: string, args: Record<string, unknown>, name?: string): Promise<MeshResult> } | null = null;
   /** The tools for `sid`: meshListing's, with the app's own (app-tools.ts) and manage_teammate where the app offers them. */
@@ -863,6 +865,7 @@ export class AgentMesh {
     // A team's lead steers the others (steer_agent) and puts its board right (manage_task): offered in a team session, answered
     // for its lead only.
     if ((await this.store.state(sid).catch(() => null))?.options.team) l = { tools: [...l.tools, STEER_TOOL, BOARD_TOOL], instructions: `${l.instructions} If you lead the crew, steer_agent stops a teammate's turn or cuts in with new orders that reach it now, and manage_task cancels, retries or reassigns a board task.` };
+    if (this.pomelo) l = { ...l, tools: [...l.tools, ...this.pomelo.tools] };
     return l;
   }
 
@@ -990,6 +993,10 @@ export class AgentMesh {
 
   private async callOne(sid: string, lane: string, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<MeshResult> {
     try {
+      if (this.pomelo) {
+        const result = await this.pomelo.call(sid, lane, name, args);
+        if (result !== null) return result;
+      }
       switch (name) {
         case "check_messages":
           return { output: await this.checkMessages(sid, lane) };
