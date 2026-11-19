@@ -1,0 +1,700 @@
+import { useContext, useEffect, useState } from "react";
+import type { ToolContext } from "../runner/context-report.js";
+import { PatchSource } from "./patchSource.js";
+import { ENGINE_MODEL_INFO, ENGINE_NAMES, ENGINE_TOOLS, MAIN_LANE, TOOL_INFO, type EngineTool, type SessionEvent } from "../types.js";
+import { clockUntil } from "../limit-reset.js";
+import type { AccountUsage, Limits } from "../runner/limits.js";
+import { EngineMark } from "./BrandMarks.js";
+import { Icon } from "./icons.js";
+import { hostApi } from "./local.js";
+import type { Identity } from "./storage.js";
+import { ContextMenu, Skeleton } from "./ui.js";
+import type { WorkspaceUsage } from "./workspace-types.js";
+
+/**
+ * How full the conversation is, as a ring beside the composer; press it for the context bar, the usage behind Friday's
+ * own models, and what each coding tool says about its own limits.
+ *
+ * The last step's token count is how much the model was handed on that step, so it stands in for the size of the
+ * context, measured against the window of the model the session runs on.
+ */
+// ponytail: windows by vendor, not per model; an exact table if the bar needs to be exact
+function windowOf(model: string): number {
+  if (/gemini/.test(model)) return 1_000_000;
+  if (/gpt-[5-9]/.test(model)) return 400_000;
+  if (/claude/.test(model)) return 200_000;
+  return 128_000;
+}
+
+/** A coding tool's window: Claude Code's models by their family, Codex's GPT-5 and Gemini CLI's by theirs, the rest by model name. */
+function windowFor(tool: EngineTool | undefined, model: string): number {
+  if (tool === "claude") return 200_000;
+  if (tool === "codex") return 400_000;
+  if (tool === "gemini") return 1_000_000;
+  return windowOf(model);
+}
+
+/** One of Friday's own models by name: the hosted Friday's catalogue; the local edition has none. */
+let fridayModelName = (_model: string): string | undefined => undefined;
+const nameOf = (model: string) => fridayModelName(model) ?? (model ? model.split("/").pop()! : "Friday");
+
+const compact = (n: number) =>
+  n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n);
+
+// One size for every tab, so the card opens in the same place whichever is showing.
+const POP_H = 218;
+/** As wide as a menu may be: the popover's right edge sits on the ring, and the rest of it reaches left. */
+const POP_W = 380;
+
+type Tab = "friday" | EngineTool;
+
+/** The tools whose limits Friday reads on the machine: these always have a glance. Another tool has one only on its own lane. */
+const LIMITED: EngineTool[] = ["claude", "codex", "cursor", "copilot"];
+const tabsFor = (tool?: EngineTool): [Tab, string][] => [["friday", "Friday"], ...[...LIMITED, ...(tool && !LIMITED.includes(tool) ? [tool] : [])].map((t): [Tab, string] => [t, ENGINE_NAMES[t]])];
+
+const until = (sec: number) => {
+  const m = Math.max(0, Math.round((sec * 1000 - Date.now()) / 60_000));
+  return m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+};
+
+import { useToolLimits, type Read } from "./toolLimits.js";
+/**
+ * One limit at a glance: a short name, how much of it is used, and when it starts over. `text`: said instead (credits left). `win`:
+ * which window it is, the five hours or the week, and `account` whose, so the ring finds its own by what it is rather than by a
+ * label that has an account's name in front of it with more than one account (2026-10-27 audit).
+ */
+type Row = { label: string; used: number | null; resets: string; text?: string; win?: "5h" | "week" | "out"; account?: string; /** Said beside its label: "Most room", on the account with the most left. */ tag?: string };
+
+/** Which window a limit is, by what its tool calls it or by its length. */
+const winOf = (kind: string | null | undefined, minutes: number | null | undefined): Row["win"] =>
+  kind === "five_hour" || minutes === 300 ? "5h" : kind === "seven_day" || minutes === 10_080 ? "week" : undefined;
+/** A tool at a glance: its limits, or the one short line that stands in for them. */
+type Glance = { plan?: string; rows: Row[]; empty?: string; link?: { label: string; href: string }; /** Why some limits are missing, said under what is there. */ note?: string };
+
+const SHORT: Record<string, string> = { five_hour: "5h", seven_day: "Weekly", seven_day_opus: "Weekly · Opus", seven_day_sonnet: "Weekly · Sonnet", overage: "Extra" };
+const shortWindow = (min: number) => (min >= 40_000 ? "Monthly" : min >= 10_080 ? "Weekly" : min >= 60 ? `${Math.round(min / 60)}h` : `${min}m`);
+
+/**
+ * One window as last read. One whose reset has passed since has started over, and how much of the new one is used was never read:
+ * it says when it started over, not a 0% nobody measured (Arun, 2026-10-27, of "5h · 0% used · Reset" with Claude in use). Claude
+ * Code gives a figure only as a limit nears; until then its "allowed" is said as it is.
+ */
+function row(label: string, usedPct: number | null, resetsAt: number | null, status?: string | null): Row {
+  // A day ago or more says which day too: a bare time read as today's (2026-10-27 audit).
+  if (resetsAt && resetsAt * 1000 <= Date.now()) return { label, used: null, resets: "", text: `Started over at ${new Date(resetsAt * 1000).toLocaleString([], Date.now() - resetsAt * 1000 >= 86_400_000 ? { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" } : { hour: "numeric", minute: "2-digit" })}` };
+  const resets = resetsAt ? `Resets in ${until(resetsAt)}` : "";
+  if (usedPct === null && status === "rejected") return { label, used: 100, resets, text: "Out of usage" };
+  if (usedPct === null && status === "allowed") return { label, used: null, resets, text: "Under the limit" };
+  return { label, used: usedPct === null ? null : Math.max(0, Math.min(100, usedPct)), resets };
+}
+
+/** One account of a tool, as the Usage page's card and the glance show it: its windows (labelled by window alone), in order. */
+export type AccountCard = { id: string; label: string; email?: string | null; plan: string | null; rows: Row[]; /** "Most room", on the one with the most left. */ tag?: string };
+
+/** What to call one of an account's windows: "5h", "Weekly", a model's own week by its model ("Weekly · Fable"). */
+const windowName = (w: { kind: string; windowMinutes: number | null; label?: string }) =>
+  SHORT[w.kind] ?? (w.kind.startsWith("seven_day_") && w.label ? w.label : w.windowMinutes ? shortWindow(w.windowMinutes) : (w.label ?? "Limit"));
+
+/**
+ * A tool's accounts on this computer, in the order they next refill, as T3 Code orders them: one out by when it comes back,
+ * the rest by their five-hour window's reset, else their soonest; never-read ones last, in their own order. The one with the
+ * most left is tagged when there's another to tell it from (one read too and fuller, or one out); a tie has no "most". Null for
+ * a tool with one account here.
+ */
+export function accountCards(limits: Read, t: "claude" | "codex"): AccountCard[] | null {
+  const list = limits && limits !== "none" ? limits.accounts?.[t] : undefined;
+  if (!list?.length) return null;
+  const now = Date.now();
+  const outNow = (a: AccountUsage) => !!a.out && !(a.outUntil && a.outUntil <= now);
+  // Windows still running: one whose reset has passed started over, and its figure is from before (row).
+  const live = (a: AccountUsage) => a.windows.filter((w) => !(w.resetsAt && w.resetsAt * 1000 <= now));
+  const refill = (a: AccountUsage) => {
+    if (outNow(a)) return a.outUntil ?? Infinity;
+    const ahead = live(a).filter((w) => w.resetsAt);
+    const w = ahead.find((x) => winOf(x.kind, x.windowMinutes) === "5h") ?? ahead.sort((x, y) => x.resetsAt! - y.resetsAt!)[0];
+    return w ? w.resetsAt! * 1000 : Infinity;
+  };
+  // How full its fullest window is, of those read; null when none is.
+  const fullest = (a: AccountUsage) => {
+    const used = live(a).map((w) => (w.usedPercent === null && w.status === "rejected" ? 100 : w.usedPercent)).filter((n): n is number => n !== null);
+    return used.length ? Math.max(...used) : null;
+  };
+  const all = [...list].sort((x, y) => refill(x) - refill(y));
+  const read = all.filter((a) => !outNow(a) && fullest(a) !== null).sort((x, y) => fullest(x)! - fullest(y)!);
+  const roomy = read[0] && fullest(read[0])! < 100 && (read.length > 1 ? fullest(read[0])! < fullest(read[1]!)! : all.some(outNow)) ? read[0].id : null;
+  return all.map((a): AccountCard => {
+    // Out until a time that has passed is back: a reading kept from then (this page's cache too) no longer says it is out
+    // (2026-10-27 audit: "Out until 3:00 PM" stood red after three).
+    const back = !!a.outUntil && a.outUntil <= now;
+    const rows: Row[] =
+      a.out && !back
+        ? [{ label: "", used: 100, resets: "", text: a.outUntil ? `Out until ${clockUntil(a.outUntil)}` : "Out of usage", win: "out" }]
+        : a.windows.length
+          ? a.windows.map((w) => ({ ...row(windowName(w), w.usedPercent, w.resetsAt, w.status), win: winOf(w.kind, w.windowMinutes) }))
+          : [{ label: "", used: null, resets: "", text: a.out && back ? `Back since ${new Date(a.outUntil!).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : (a.why ?? "No reading yet") }];
+    return { id: a.id, label: a.label, ...(a.email ? { email: a.email } : {}), plan: a.plan, rows, ...(a.id === roomy ? { tag: "Most room" } : {}) };
+  });
+}
+
+/** What each tool's glance says, from one reading of this computer. */
+export function glanceOf(limits: Read): Record<EngineTool, Glance> {
+  const elsewhere = (t: EngineTool): Glance => {
+    const url = TOOL_INFO[t].usage;
+    return { rows: [], empty: "Not shared on this computer", ...(url ? { link: { label: `See usage on ${new URL(url).hostname.replace(/^www\./, "")}`, href: url } } : {}) };
+  };
+  const none = limits === "none" ? "Connect your computer" : limits === null ? "…" : "";
+  const got = limits && limits !== "none" ? limits : null;
+  const codex = got?.codex ?? null;
+  // Every Codex window when the computer says them (Friday 0.1.33 on), else the one it always did.
+  const codexRows = got?.codexWindows?.length
+    ? got.codexWindows.map((w) => ({ ...row(w.windowMinutes ? shortWindow(w.windowMinutes) : "Limit", w.usedPercent, w.resetsAt), win: winOf(w.kind, w.windowMinutes) }))
+    : codex
+      ? [{ ...row(shortWindow(codex.windowMinutes), codex.usedPercent, codex.resetsAt), win: winOf(null, codex.windowMinutes) }]
+      : [];
+  const cursor = got?.cursor ?? null;
+  // The other tools read on this computer (tool-limits.ts): their windows, the credits left where they sell credits, and the age
+  // of a reading kept from before their sign-in lapsed.
+  const others = Object.fromEntries(
+    Object.entries(got?.tools ?? {}).map(([t, a]): [EngineTool, Glance] => {
+      const url = TOOL_INFO[t as EngineTool].usage;
+      const rows = [
+        ...a!.windows.map((w) => ({ ...row(w.label ?? (w.windowMinutes ? shortWindow(w.windowMinutes) : "Limit"), w.usedPercent, w.resetsAt), win: winOf(w.kind, w.windowMinutes) })),
+        ...(a!.balanceUsd !== undefined ? [{ label: "Credits", used: null, resets: "", text: `$${a!.balanceUsd.toFixed(2)} left` }] : []),
+      ];
+      const ago = Math.round((Date.now() - a!.at) / 60_000);
+      return [
+        t as EngineTool,
+        {
+          ...(a!.plan ? { plan: a!.plan } : {}),
+          rows,
+          empty: a!.why ?? "No limits on this plan",
+          ...(rows.length && a!.stale ? { note: `${ago < 60 ? `${ago}m` : ago < 1440 ? `${Math.round(ago / 60)}h` : `${Math.round(ago / 1440)}d`} ago · ${a!.why ?? ""}` } : {}),
+          ...(url ? { link: { label: `See usage on ${new URL(url).hostname.replace(/^(www|app)\./, "")}`, href: url } } : {}),
+        },
+      ];
+    }),
+  ) as Partial<Record<EngineTool, Glance>>;
+  /**
+   * A tool with more than one account on the computer (runner/accounts.ts): each account's windows, under its name, so both are
+   * seen at once and the one a lane runs on can be told from the other (accountCards, flattened). One out says until when instead.
+   */
+  const byAccount = (t: "claude" | "codex"): Row[] | null => {
+    const cards = accountCards(limits, t);
+    if (!cards) return null;
+    return cards.flatMap((c) =>
+      c.rows.map((r, i): Row => ({ ...r, label: r.label ? `${c.label} · ${r.label}` : c.label, account: c.id, ...(i === 0 && c.tag ? { tag: c.tag } : {}) })),
+    );
+  };
+  const claudeAccounts = byAccount("claude");
+  const codexAccounts = byAccount("codex");
+  return {
+    ...(Object.fromEntries(ENGINE_TOOLS.map((t) => [t, elsewhere(t)])) as Record<EngineTool, Glance>),
+    ...others,
+    claude: {
+      ...(got?.claudePlan ? { plan: got.claudePlan } : {}),
+      rows: claudeAccounts ?? (got?.claudeWindows ?? []).map((w) => ({ ...row(SHORT[w.kind ?? ""] ?? w.label ?? "Limit", w.utilization === null ? null : w.utilization * 100, w.resetsAt, w.status), win: winOf(w.kind, null) })),
+      // A slow answer is not a fault to report: "didn't answer in time" beside the context's own "Asking…" read as the card
+      // contradicting itself (2026-10-29 verify). Said as what happens next, here, so an older computer's words are covered too.
+      empty: none || (got?.claudeWhy && /didn't answer in time/.test(got.claudeWhy) ? "Its limits show here after its next turn." : got?.claudeWhy) || "No reading yet",
+      // What Claude Code itself said of its limits, asked (`get_usage`) or as it last ran in Friday, and how long ago. Its sign-in
+      // is never read: runner/limits.ts.
+      ...(got?.claudeWindows?.length ? { note: got.claudeFrom === "account" ? `From Claude Code, ${keptAgo(got.claudeWindows)}` : `From Claude Code's last run in Friday, ${keptAgo(got.claudeWindows)}` } : {}),
+    },
+    codex: {
+      ...(codex?.plan ? { plan: codex.plan } : {}),
+      rows: codexAccounts ?? codexRows,
+      empty: none || "No reading yet",
+    },
+    cursor: {
+      ...(cursor?.plan ? { plan: cursor.plan } : {}),
+      rows: (cursor?.windows ?? []).map((w) => row(w.label ?? "Included", w.usedPercent, w.resetsAt)),
+      empty: none || cursor?.why || (cursor ? "No usage on this plan" : "Not shared on this computer"),
+      link: { label: "See usage on cursor.com", href: "https://cursor.com/dashboard?tab=usage" },
+    },
+    copilot: {
+      ...(got?.copilot?.plan ? { plan: got.copilot.plan } : {}),
+      rows: (got?.copilot?.windows ?? []).map((w) => row(w.label ?? "Allowance", w.usedPercent, w.resetsAt)),
+      empty: none || got?.copilot?.why || (got?.copilot ? "No allowance on this plan" : "Not shared on this computer"),
+      link: { label: "See usage on github.com", href: "https://github.com/settings/copilot/features" },
+    },
+  };
+}
+
+
+/** One tool at a glance: its plan, then a bar per limit that fills as it is used. Amber from 70% used, red from 90%. */
+function ToolGlance({ tool, g, bare = false }: { tool: EngineTool; g: Glance; /** Under a tab that already says which tool: just its limits. */ bare?: boolean }) {
+  return (
+    <section className="lg-tool">
+      {!bare && (
+        <div className="lg-head">
+          <EngineMark tool={tool} size={14} />
+          <b>{ENGINE_NAMES[tool]}</b>
+          {g.plan && <span className="lg-plan">{g.plan}</span>}
+        </div>
+      )}
+      {g.rows.length ? (
+        // By place as well as label: two accounts' rows, or two windows a tool names alike, shared a key (2026-10-27 audit).
+        g.rows.map((r, i) => (
+          <div key={`${i}:${r.label}`} className={`lg-row ${r.used === null ? "" : r.used >= 90 ? "low" : r.used >= 70 ? "mid" : ""}`}>
+            {/* The same three lines in every row, whatever the numbers: what and how much, the bar, when it resets. On one
+                line, a wider "100% used" pushed the reset time under it in that row only. */}
+            <div className="lg-line">
+              <span className="lg-label">{r.label}</span>
+              {r.tag && <span className="lg-tag">{r.tag}</span>}
+              <span className="lg-used">{r.text ?? (r.used === null ? "—" : `${Math.round(r.used)}% used`)}</span>
+            </div>
+            {!r.text && (
+              <div className="lg-bar">
+                <i style={{ width: `${r.used ?? 0}%` }} />
+              </div>
+            )}
+            {r.resets && <div className="lg-reset">{r.resets}</div>}
+          </div>
+        ))
+      ) : g.empty === "…" ? (
+        // The very first reading on this computer: two bars' worth of shape until it lands.
+        [0, 1].map((i) => (
+          <div key={i} className="lg-row sk-glance" aria-hidden>
+            <Skeleton w={i ? "38%" : "52%"} h={11} />
+            <Skeleton h={6} r={3} />
+          </div>
+        ))
+      ) : (
+        <div className="lg-empty">
+          {g.empty}
+          {g.link && (
+            <a href={g.link.href} target="_blank" rel="noreferrer">
+              {g.link.label}
+            </a>
+          )}
+        </div>
+      )}
+      {g.note && g.rows.length > 0 && <p className="lg-note">{g.note}</p>}
+    </section>
+  );
+}
+
+/**
+ * A tool's accounts on this computer as the Usage page shows them (T3 Code's Usage › Limits has a bar per account): a card each,
+ * in the order they refill (accountCards), who it is, its plan and its windows, and the one with the most room said.
+ */
+export function AccountCardsView({ limits, tool, className = "" }: { limits: Read; tool: "claude" | "codex"; className?: string }) {
+  const cards = accountCards(limits, tool);
+  if (!cards) return null;
+  return (
+    <>
+      {cards.map((c) => (
+        <section key={c.id} className={`lh-acct ${className}`} aria-label={`${c.label} account`}>
+          <header className="lh-acct-head">
+            <b>{c.label}</b>
+            {c.tag && <span className="lg-tag">{c.tag}</span>}
+            {c.plan && <span className="lg-plan">{c.plan}</span>}
+          </header>
+          {c.email && <div className="lh-acct-who">{c.email}</div>}
+          <div className="lg-glance lg-one">
+            <ToolGlance tool={tool} g={{ rows: c.rows }} bare />
+          </div>
+        </section>
+      ))}
+    </>
+  );
+}
+
+/** The limits Friday can read, one tool under another: the rail's Usage card, and a Solo session's. */
+export function CodingToolLimits({ identity, only }: { identity: Identity; /** Just this tool's: the card over its own ring on the rail. */ only?: EngineTool }) {
+  const limits = useToolLimits(identity);
+  const g = glanceOf(limits);
+  // The four always, then every other tool this computer has a reading for.
+  const read = limits && limits !== "none" ? limits.tools ?? {} : {};
+  const shown = only ? [only] : ENGINE_TOOLS.filter((t) => LIMITED.includes(t) || read[t]);
+  return (
+    <div className="lg-glance">
+      {shown.map((t) => (
+        <ToolGlance key={t} tool={t} g={g[t]} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * What a session's ring opens: a tab for each coding tool, each a glance at its limits, and on Team one for Friday's own agent
+ * (its context and allowance) too. One size for every tab, so the card doesn't jump as they are switched.
+ */
+function PopBody({ identity, first, ws, ctx, solo, lane, live }: { identity: Identity; first: Tab; ws: WorkspaceUsage | null | undefined; ctx: { model: string; tokens: number; window: number }; solo: boolean; /** The agent the box is aimed at, whose tool is `first`. */ lane?: string; /** Its context at the end of its last turn, as its tool said. */ live?: { used: number; window: number } | null }) {
+  const [tab, setTab] = useState<Tab>(first);
+  const limits = useToolLimits(identity);
+  const glance = glanceOf(limits);
+  return (
+    <div className={`lim ${solo ? "solo" : ""}`}>
+      <div className="lim-tabs" role="tablist">
+        {tabsFor(first === "friday" ? undefined : first).filter(([id]) => !(solo && id === "friday")).map(([id, label]) => (
+          // The tab is the tool's name now (there is no heading under it), so its plan is said here.
+          <button key={id} type="button" role="tab" aria-label={label} title={id !== "friday" && glance[id].plan ? `${label} · ${glance[id].plan}` : label} aria-selected={tab === id} className={tab === id ? "on" : ""} onClick={() => setTab(id)}>
+            <EngineMark tool={id === "friday" ? "" : id} size={16} />
+          </button>
+        ))}
+      </div>
+      {tab === "friday" ? (
+        <>
+        </>
+      ) : (
+        <>
+          {/* The agent's own context, by what fills it, above its tool's limits (Arun, 2026-10-21: "just like claude code does it"). */}
+          {tab === first && lane && <ToolContextView tool={tab} lane={lane} live={live ?? null} />}
+          <div className="lg-glance lg-one">
+            <ToolGlance tool={tab} g={glance[tab]} bare />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The rows of a tool's glance that are the lane's: with more than one account on the computer, those of the account it runs on
+ * (its lane's `account`, else the first, its default), each labelled with the account's name; with one, all of them.
+ */
+function rowsFor(tool: EngineTool, limits: Read, account?: string): Row[] {
+  const rows = glanceOf(limits)[tool]?.rows ?? [];
+  if (!rows.some((r) => r.account)) return rows;
+  const id = account && rows.some((r) => r.account === account) ? account : rows.find((r) => r.account)!.account;
+  return rows.filter((r) => r.account === id);
+}
+
+/**
+ * A tool's 5-hour window as the glance reads it (Claude Code's five_hour, a 300-minute Codex window), when it has one: found by
+ * which window it is, for the account the lane runs on. An account out of usage is full until it comes back.
+ */
+export function fiveHourOf(tool: EngineTool | undefined, limits: Read, account?: string): { used: number; resets: string } | null {
+  if (!tool) return null;
+  const rows = rowsFor(tool, limits, account);
+  const out = rows.find((x) => x.win === "out");
+  if (out) return { used: 100, resets: out.text ?? "" };
+  const r = rows.find((x) => x.win === "5h" && x.used !== null);
+  return r ? { used: r.used!, resets: r.resets } : null;
+}
+
+/** A tool's weekly window as the glance reads it, for the account the lane runs on, when it has a figure. */
+export function weekOf(tool: EngineTool | undefined, limits: Read, account?: string): Row | null {
+  if (!tool) return null;
+  return rowsFor(tool, limits, account).find((x) => x.win === "week" && x.used !== null) ?? null;
+}
+
+/**
+ * One account of a tool as the limits read it: who (its label, email and plan), its 5 hours and its week, its tag ("Most room") and,
+ * when it ran out, until when. A tool with one account here is one of these, "Main", from its own reading (Arun, 2026-11-17: the
+ * accounts design for the rail's card and the Usage page).
+ */
+export type AccountView = { id: string; label: string; email: string | null; plan: string | null; tag?: string; five: AccountCard["rows"][number] | null; week: AccountCard["rows"][number] | null; out: string; /** Its other windows, a model's own week ("Weekly · Fable"), as Claude Code says them. */ more: AccountCard["rows"] };
+export function accountViews(limits: Read, tool: EngineTool): AccountView[] {
+  const pickOf = (rows: AccountCard["rows"]) => {
+    const five = rows.find((r) => r.win === "5h") ?? null;
+    // The account's own week first (its windows come in WINDOW_ORDER: seven_day before a model's), a model's week after it.
+    const week = rows.find((r) => r.win === "week") ?? null;
+    return { five, week, out: rows.find((r) => r.win === "out")?.text ?? "", more: rows.filter((r) => r !== five && r !== week && r.win !== "out" && r.used !== null) };
+  };
+  const cards = tool === "claude" || tool === "codex" ? accountCards(limits, tool) : null;
+  if (cards) return cards.map((c) => ({ id: c.id, label: c.label, email: c.email ?? null, plan: c.plan, ...(c.tag ? { tag: c.tag } : {}), ...pickOf(c.rows) }));
+  const g = glanceOf(limits)[tool];
+  return g?.rows.length ? [{ id: "default", label: "Main", email: null, plan: g.plan ?? null, ...pickOf(g.rows) }] : [];
+}
+
+/** A ring's colour band: green with room, orange from 70% used, red from 90%, as the glance's bars are (ToolGlance). */
+const bandOf = (used: number) => (used >= 90 ? "red" : used >= 70 ? "orange" : "green");
+
+/**
+ * Your coding tools' limits on the rail, a twin ring for each tool that has a reading (Arun, 2026-11-17: "a ring design on the rail
+ * for the usage limits of your connected/signed in coding tools", "it will hold hourly and weekly limits", option B of the mockups;
+ * "use vibrant and beautiful colors of green, yellow/orange and red"): its week the outer ring and its 5-hour window (or, without one, its first
+ * figure) the inner, its mark in the middle; a 5-hour window used up says when it starts over instead. Null with no
+ * reading at all, where the rail keeps its plain Usage icon.
+ */
+export function useRailLimits(identity: Identity, off = false): { tool: EngineTool; outer: number; inner: number | null; back: string; label: string; accounts: number; /** The outer figure's window, short: "5h", "wk", or a tool's own ("Chat"). */ outerShort: string; /** Its 5-hour and weekly figures, or its own two (a month's allowances), short-named: the "+N" card's rows. */ windows: { short: string; used: number; resets: string }[] }[] {
+  const limits = useToolLimits(identity, off);
+  const read = limits && limits !== "none" ? limits.tools ?? {} : {};
+  // The account new sessions use (Accounts.tsx preferredAccount), followed as it changes.
+  const [, again] = useState(0);
+  useEffect(() => {
+    const on = () => again((n) => n + 1);
+    addEventListener("friday-account-default", on);
+    addEventListener("storage", on);
+    return () => (removeEventListener("friday-account-default", on), removeEventListener("storage", on));
+  }, []);
+  return ENGINE_TOOLS.filter((t) => LIMITED.includes(t) || read[t]).flatMap((tool) => {
+    const many = limits && limits !== "none" && (tool === "claude" || tool === "codex") ? (limits.accounts?.[tool] ?? []) : [];
+    const account = many.length > 1 ? inUseAccount(tool, many.map((a) => a.id)) : undefined;
+    const five = fiveHourOf(tool, limits, account);
+    const week = weekOf(tool, limits, account);
+    const first = five ? null : rowsFor(tool, limits, account).find((r) => r.used !== null && r.win !== "week");
+    const outer = five?.used ?? first?.used ?? week?.used ?? null;
+    if (outer === null) return [];
+    const inner = five || first ? (week?.used ?? null) : null;
+    // "Resets in 2h 05m" → "2h"; "Out until 3:10 PM" has no short form, and keeps the mark.
+    const back = outer >= 100 ? (/in (\d+[dhm])/.exec(five?.resets ?? first?.resets ?? "")?.[1] ?? "") : "";
+    const outerName = five ? "5-hour" : first ? first.label : "Weekly";
+    const who = account ? ` (${many.find((a) => a.id === account)?.label ?? "Main"}, 1 of ${many.length} accounts)` : "";
+    const label = `${ENGINE_NAMES[tool]}${who}: ${outerName} ${Math.round(outer)}% used${inner !== null ? `, weekly ${Math.round(inner)}% used` : ""}${back ? `, back in ${back}` : ""}`;
+    // A tool's own allowance ("Cursor models", "Chat") reads by when it resets: days away is the month's.
+    const outerShort = five ? "5h" : !first || /week/i.test(first.label) ? "wk" : /\d+d\b/.test(first.resets) ? "mo" : (first.label.split(/\s+/)[0] ?? "").slice(0, 6);
+    // The 5 hours and the week, as the ring has them (Arun, 2026-11-18: "make sure it shws like the hourly and wkeely"). A tool with
+    // no 5 hours shows two of its weeks (Antigravity's Gemini and its Claude and GPT), named by what each is for; one with neither,
+    // its own first two (Copilot's Chat and Completions).
+    const all = rowsFor(tool, limits, account).filter((r) => r.used !== null && r.win !== "out");
+    const isHour = (r: Row) => r.win === "5h" || /^5h\b|5-hour/i.test(r.label);
+    const isWeek = (r: Row) => r.win === "week" || /^weekly\b|\bweek\b/i.test(r.label);
+    const weeks = all.filter(isWeek);
+    const named = (r: Row) => (r.label.split("·")[1] ?? "").trim().split(/\s+/)[0] ?? "";
+    const hour = five ? { short: "5h", used: five.used, resets: five.resets ?? "" } : (([r]) => (r ? { short: "5h", used: r.used!, resets: r.resets } : null))(all.filter(isHour));
+    const weekRows = (week ? [week, ...weeks.filter((r) => r.label !== week.label)] : weeks).map((r) => ({ short: weeks.length > 1 && named(r) ? `${named(r)} wk` : "wk", used: r.used!, resets: r.resets }));
+    const windows = (hour || weekRows.length ? [...(hour ? [hour] : []), ...weekRows] : all.map((r) => ({ short: /\d+d\b/.test(r.resets) && all.length === 1 ? "mo" : r.label, used: r.used!, resets: r.resets }))).slice(0, 2);
+    return [{ tool, outer, inner, back, label, accounts: Math.max(1, many.length), outerShort, windows }];
+  });
+}
+
+/** The account new sessions use, by id, as Accounts.tsx keeps it ("mpa.account.default.<tool>"); the tool's own sign-in until picked. */
+export function inUseAccount(tool: EngineTool, ids: string[]): string {
+  let id = "";
+  try {
+    id = localStorage.getItem(`mpa.account.default.${tool}`) ?? "";
+  } catch {
+    // Private mode: the tool's own sign-in.
+  }
+  return ids.includes(id) ? id : "default";
+}
+
+/**
+ * One tool's twin ring for the rail: the week outside, 5 hours inside, its mark in the middle, always: a full one says when it is
+ * back in its label and card, not in the ring (Arun, 2026-11-18: "get rid of this time thing and just keep the icon").
+ */
+export function RailRing({ tool, outer, inner }: { tool: EngineTool; outer: number; inner: number | null }) {
+  const R1 = 16.5;
+  const R2 = 11.75;
+  const arc = (r: number, used: number, w: number, band: string) => {
+    const c = 2 * Math.PI * r;
+    return (
+      <>
+        <circle className="rr-track" cx="19" cy="19" r={r} fill="none" strokeWidth={w} />
+        {used > 0 && <circle className={`rr-arc ${band}`} cx="19" cy="19" r={r} fill="none" strokeWidth={w} strokeLinecap="round" strokeDasharray={`${(c * Math.min(used, 100)) / 100} ${c}`} transform="rotate(-90 19 19)" />}
+      </>
+    );
+  };
+  return (
+    <span className="rr" aria-hidden="true">
+      <svg className="rr-rings" width="38" height="38" viewBox="0 0 38 38">
+        {/* The week outside and the five hours inside (Arun, 2026-11-17: "swap the ring placements for weekly and hourly"); a tool
+            with no week has its one figure as the outer ring alone. */}
+        {inner !== null ? (
+          <>
+            {arc(R1, inner, 3, bandOf(inner))}
+            {arc(R2, outer, 2.5, bandOf(outer))}
+          </>
+        ) : (
+          arc(R1, outer, 3, bandOf(outer))
+        )}
+      </svg>
+      <EngineMark tool={tool} size={inner !== null ? 13 : 16} className="rr-mark" />
+    </span>
+  );
+}
+
+export function ContextGauge({ events, model = "", identity, tool, lane, solo = false, account }: { events: SessionEvent[]; friday: boolean; model?: string; identity: Identity; tool?: EngineTool; /** The agent the message box is aimed at: the ring is its context, not the whole session's. */ lane?: string; /** Solo: the coding tools' glance, and no Friday tab. */ solo?: boolean; /** Which of the tool's accounts on the computer the lane runs on, when it has more than one. */ account?: string }) {
+  const WINDOW = windowFor(tool, model);
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  // undefined while it is being read, null when it couldn't be.
+  const [ws, setWs] = useState<WorkspaceUsage | null | undefined>(undefined);
+  const used = events.findLast((e) => e.body.type === "agent.message" && (e.body.tokens ?? 0) > 0 && (!lane || (e.lane ?? MAIN_LANE) === lane))?.body;
+  const tokens = used && used.type === "agent.message" ? (used.tokens ?? 0) : 0;
+  // A coding tool's context, as it said at the end of its last turn: its last model call's input against its model's window.
+  const toolUsage = tool ? events.findLast((e) => e.body.type === "agent.usage" && (e.body.context ?? 0) > 0 && (!lane || (e.lane ?? MAIN_LANE) === lane))?.body : undefined;
+  const live = toolUsage?.type === "agent.usage" ? { used: toolUsage.context!, window: toolUsage.window || WINDOW } : null;
+  // A coding tool's ring is its 5-hour limit, the one a working day runs into; never a weekly or monthly one. A tool that has no
+  // 5-hour window (Cursor and Copilot sell monthly allowances) shows its context instead, and says so.
+  const limits = useToolLimits(identity);
+  const five = fiveHourOf(tool, limits, account);
+  // The week beside the five hours, as Orca's bar says both ("17% 5h · 43% wk"): the week is what a long day runs into next.
+  const week = weekOf(tool, limits, account);
+  // A coding tool's context is what it said of it (agent.usage), not Friday's own count; until it has said, there is no figure
+  // to show, and "0%" with "context 0 of 200k" beside a card saying "Not reported yet" disagreed with itself (2026-10-27 audit).
+  const ctxUsed = tool ? (live?.used ?? 0) : tokens;
+  const ctxWindow = tool ? (live?.window ?? WINDOW) : WINDOW;
+  const reported = !!five || (tool ? !!live : tokens > 0);
+  const pct = five ? five.used / 100 : Math.min(1, ctxUsed / ctxWindow);
+  // A thin ring and how full it is beside it, in figures (2026-10-27 design review: a bare ring was a shape to decode); the tooltip
+  // and the card say whose limit it is.
+  const r = 9;
+  const c = 2 * Math.PI * r;
+  const tone = pct >= 0.9 ? "hot" : pct >= 0.7 ? "warm" : "";
+  // Which agent and model this is, said on the ring: switch the box to Codex and it reads Codex's context, under Codex's name.
+  const who = tool ? [ENGINE_NAMES[tool], ENGINE_MODEL_INFO[tool]?.find((m) => m.id === model)?.label ?? (model && model !== "auto" ? model : "")].filter(Boolean).join(" · ") : nameOf(model);
+  return (
+    <>
+      <button
+        type="button"
+        className={`ctx-gauge ${tool ? "has-mark " : ""}${tone || "ok"}`}
+        title={five ? `${who} · 5-hour limit ${Math.round(five.used)}% used${five.resets ? ` · ${five.resets}` : ""}${week ? ` · weekly ${Math.round(week.used!)}% used` : ""}` : reported ? `${who} · Context ${compact(ctxUsed)} of ${compact(ctxWindow)}` : `${who} · Context: not reported yet`}
+        aria-label={five ? `${who}: 5-hour limit ${Math.round(five.used)}% used` : reported ? `${who}: context ${Math.round(pct * 100)}% full` : `${who}: context not reported yet`}
+        // Its own press isn't "outside" the card it opened: without this the card closed on mousedown and the click opened it again.
+        onMouseDown={(e) => e.stopPropagation()}
+        aria-expanded={!!at}
+        onClick={(e) => {
+          const b = e.currentTarget.getBoundingClientRect();
+          // Opens to the left of the ring, from its right edge; the menu keeps itself inside the window.
+          setAt(at ? null : { x: b.right, y: b.top - 6 });
+          if (!solo) void fetch("/api/workspace", { credentials: "same-origin" }).then((r) => r.json()).then((d: { workspace?: WorkspaceUsage }) => setWs(d.workspace ?? null), () => setWs(null));
+        }}
+      >
+        <svg className="ctx-ring" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+          <circle cx="11" cy="11" r={r} fill="none" stroke="currentColor" strokeOpacity=".22" strokeWidth="2.25" />
+          <circle cx="11" cy="11" r={r} fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeDasharray={`${c * pct} ${c}`} transform="rotate(-90 11 11)" />
+        </svg>
+        <span className="ctx-pct" aria-hidden="true">
+          {reported ? `${Math.round(pct * 100)}%` : "–"}{five && <em> 5h</em>}
+          {five && week && (
+            <>
+              <i> · </i>
+              {Math.round(week.used!)}%<em> wk</em>
+            </>
+          )}
+        </span>
+      </button>
+      {at && (
+        <ContextMenu
+          at={at}
+          end
+          width={POP_W}
+          onClose={() => setAt(null)}
+          items={() => [
+            { node: <PopBody identity={identity} first={tool ?? (solo ? "claude" : "friday")} ws={ws} ctx={{ model, tokens, window: WINDOW }} solo={solo} {...(tool && lane ? { lane, live } : {})} />, height: tool === "claude" ? POP_H + 300 : tool ? POP_H + 70 : POP_H },
+          ]}
+        />
+      )}
+    </>
+  );
+}
+
+/** What a category of Claude Code's context is drawn in, by its name: the same colour wherever it is shown. */
+function hueOf(name: string): string {
+  const n = name.toLowerCase();
+  if (n.startsWith("free")) return "free";
+  if (n.startsWith("autocompact")) return "buffer";
+  if (n.startsWith("messages")) return "messages";
+  if (n.startsWith("mcp")) return "mcp";
+  if (n.startsWith("system tools")) return "tools";
+  if (n.startsWith("system prompt")) return "prompt";
+  if (n.startsWith("skills")) return "skills";
+  if (n.startsWith("memory")) return "memory";
+  if (n.includes("agent")) return "agents";
+  return "other";
+}
+
+/**
+ * A coding tool's context, the way Claude Code's own /context shows it: how full the window is, a bar split by what fills it
+ * (system prompt, tools, MCP tools, skills, messages, the autocompact buffer, free space), a row each, and which MCP servers
+ * take the most. Claude Code says the breakdown itself, asked of a copy of the conversation (Runner.toolContext); for another
+ * tool it is how full it is, as it said at the end of its last turn.
+ */
+/** Each lane's last context report, by session and lane, so the card opens on it while it is asked again. */
+const seenContext = new Map<string, ToolContext>();
+
+function ToolContextView({ tool, lane, live }: { tool: EngineTool; lane: string; live: { used: number; window: number } | null }) {
+  const src = useContext(PatchSource);
+  const seenKey = `${src?.sid ?? ""}:${lane}`;
+  // undefined while it is asked, null when it couldn't be. Opened again, the last report shows at once while it is asked anew.
+  const [ctx, setCtx] = useState<ToolContext | null | undefined>(tool === "claude" ? seenContext.get(seenKey) : null);
+  useEffect(() => {
+    if (tool !== "claude" || !src) return setCtx(null);
+    let on = true;
+    void fetch(`/api/sessions/${encodeURIComponent(src.sid)}/repo?op=context&lane=${encodeURIComponent(lane)}&invite=${encodeURIComponent(src.invite)}`, { credentials: "same-origin" })
+      .then((r) => r.json() as Promise<{ output?: string }>)
+      .then((j) => {
+        const got = (JSON.parse(j.output ?? "{}") as { context?: ToolContext | null }).context ?? null;
+        if (got) seenContext.set(seenKey, got);
+        // Nothing this time keeps the one already showing: a slow or failed ask isn't a reason to empty the card.
+        if (on) setCtx((was) => got ?? was ?? null);
+      })
+      .catch(() => on && setCtx((was) => was ?? null));
+    return () => {
+      on = false;
+    };
+  }, [tool, lane, src?.sid, src?.invite]);
+  const used = ctx?.used ?? live?.used ?? 0;
+  const window = ctx?.window ?? live?.window ?? 0;
+  const pct = window ? Math.min(100, (used / window) * 100) : 0;
+  // What is in the window, without what is only loaded when used ("deferred"), which the window doesn't hold yet.
+  const shown = (ctx?.categories ?? []).filter((c) => !/deferred/i.test(c.name) && c.tokens > 0);
+  const deferred = (ctx?.categories ?? []).filter((c) => /deferred/i.test(c.name) && c.tokens > 0);
+  const total = shown.reduce((n, c) => n + c.tokens, 0) || 1;
+  const tone = pct >= 90 ? "hot" : pct >= 70 ? "warm" : "";
+  // The rows fold under the header and the bar, closed until asked for (Arun, 2026-10-24: "make this collapsable and have it be
+  // closed on default"): how full it is reads at a glance, what fills it is a press away.
+  const [open, setOpen] = useState(false);
+  // Nothing reported: one quiet line, without an empty bar or a caret that opens onto nothing.
+  if (!window && ctx !== undefined && !shown.length)
+    return (
+      <section className="ctx-tool none" aria-label={`${ENGINE_NAMES[tool]}'s context`}>
+        <div className="ctx-tool-head">
+          <span className="ctx-tool-title">Context</span>
+          <span className="ctx-tool-n">Not reported yet</span>
+        </div>
+      </section>
+    );
+  return (
+    <section className={`ctx-tool ${tone} ${open ? "open" : ""}`} aria-label={`${ENGINE_NAMES[tool]}'s context`}>
+      <button type="button" className="ctx-tool-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <Icon name="chevronDown" size={13} className="ctx-tool-caret" />
+        <span className="ctx-tool-title">Context{ctx?.model ? <span className="ctx-tool-model"> · {ctx.model}</span> : null}</span>
+        <span className="ctx-tool-n">
+          {ctx?.at && Date.now() - ctx.at > 2 * 60_000 && <span className="ctx-tool-asof">as of {Math.round((Date.now() - ctx.at) / 60_000)} min ago · </span>}
+          {window ? `${compact(used)} / ${compact(window)} · ${Math.round(pct)}%` : ctx === undefined ? "Asking…" : "Not reported yet"}
+        </span>
+      </button>
+      {shown.length ? (
+        <div className="ctx-stack" role="img" aria-label={shown.map((c) => `${c.name} ${compact(c.tokens)}`).join(", ")}>
+          {shown.map((c) => (
+            <i key={c.name} className={`ctx-seg ${hueOf(c.name)}`} style={{ width: `${(c.tokens / total) * 100}%` }} title={`${c.name}: ${compact(c.tokens)}`} />
+          ))}
+        </div>
+      ) : !window ? null : (
+        // Nothing known yet draws no track: an empty grey bar beside nothing read as broken (2026-10-28 QA).
+        <div className="ctx-stack" aria-hidden="true">
+          {/* Nothing reported is an empty track, not a sliver of colour. */}
+          {pct > 0 && <i className="ctx-seg messages" style={{ width: `${pct}%` }} />}
+        </div>
+      )}
+      {!open ? null : ctx === undefined ? (
+        <div className="ctx-rows" aria-label="Asking Claude Code for its breakdown">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} h={12} w={`${70 - i * 9}%`} />
+          ))}
+        </div>
+      ) : shown.length ? (
+        <>
+          <ul className="ctx-rows">
+            {shown.map((c) => (
+              <li key={c.name}>
+                <i className={`ctx-dot ${hueOf(c.name)}`} aria-hidden="true" />
+                <span className="ctx-row-name">{c.name}</span>
+                <span className="ctx-row-n">{compact(c.tokens)}</span>
+                <span className="ctx-row-pct">{window ? `${((c.tokens / window) * 100).toFixed(c.tokens / window < 0.1 ? 1 : 0)}%` : ""}</span>
+              </li>
+            ))}
+          </ul>
+          {(ctx?.servers.length ?? 0) > 0 && (
+            <p className="ctx-note">
+              <b>MCP tools by server:</b> {ctx!.servers.slice(0, 4).map((x) => `${x.name} ${compact(x.tokens)}`).join(" · ")}
+              {deferred.length > 0 && ` (${deferred.map((d) => `${d.name.replace(/\s*\(deferred\)/i, "")} ${compact(d.tokens)}`).join(", ")} loaded only when used)`}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="ctx-note">{tool === "claude" ? "Claude Code didn't say its breakdown just now. Open this again in a moment." : `${ENGINE_NAMES[tool]} reports how full it is, not what fills it.`}</p>
+      )}
+    </section>
+  );
+}
+
+/** How long ago a kept reading of Claude's windows was taken: "2 min ago", "1 h ago". */
+function keptAgo(windows: { at: number }[]): string {
+  const m = Math.max(0, Math.round((Date.now() - Math.min(...windows.map((w) => w.at))) / 60_000));
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+}

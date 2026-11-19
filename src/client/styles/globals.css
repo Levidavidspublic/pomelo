@@ -1,0 +1,194 @@
+/* Tailwind v4 + shadcn/ui tokens for the AI Elements components.
+   Built to public/tailwind.css (npm run build:css). The app's own
+   hand-written styles live in public/style.css and load after this. */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@source "../";
+@source "../../../node_modules/streamdown/dist/*.js";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Geist", "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--surface-accent);
+  --color-accent-foreground: var(--surface-accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+}
+
+/* Light is the bare :root; dark is the class <html> carries by default. The
+   app's own tokens in style.css mirror this split, and style.css loads last,
+   so where a name appears in both it is the app's value that wins. */
+/* shadcn's names for the app's own tokens (public/style.css, which loads after this and holds the values, light and dark and a
+   colour theme alike): one palette, read by the library's components and the app's own rules the same (2026-10-29 direction). */
+:root,
+.dark {
+  --radius: 0.75rem;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --card-foreground: var(--ink);
+  --popover: var(--card);
+  --popover-foreground: var(--ink);
+  --primary: var(--accent);
+  --primary-foreground: var(--on-accent);
+  --secondary: var(--hover);
+  --secondary-foreground: var(--ink);
+  --surface-accent: var(--hover);
+  --surface-accent-foreground: var(--ink);
+  --destructive: var(--red);
+  --input: var(--border-strong);
+  --ring: var(--border-focus);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+}
+
+/* ── Dass ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   Friday's design language (docs/dass-design-language.md): shadcn's components, on the app's own palette, with one
+   signature: what is working is blue, what is ready is green, what waits on you is amber, everything else is quiet (Arun,
+   2026-10-20: "make the working circle blue and the ready green"). The sidebar's shadcn colours
+   follow the app's tokens (style.css), so light and dark carry through without a second palette. */
+:root,
+.dark {
+  /* The direction's state colours (style.css --live, --ready, --needs) under the names the older rules use. */
+  --dass-live: var(--live);
+  --dass-ok: var(--green);
+  --dass-needs: var(--amber);
+  --dass-ease: var(--ease-out);
+  --dass-fast: var(--t-hover);
+  --dass-med: var(--t-open);
+  --sidebar-foreground: var(--ink-2);
+  --sidebar-primary: var(--ink);
+  --sidebar-primary-foreground: var(--bg);
+  --sidebar-accent: var(--hover);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--border-focus);
+}
+
+@layer components {
+  /* The sidebar's icon buttons: 8px corners, --ink-3 at rest and --ink under the pointer; the place you're in is a fill, never an
+     outline or a bar at the edge (2026-10-29 direction §5, §6). */
+  .dass-rail-btn {
+    @apply relative grid size-10 place-items-center rounded-[8px] text-[var(--text-muted)] outline-none transition-colors;
+    transition-duration: var(--dass-fast);
+  }
+  .dass-rail-btn:hover { @apply bg-sidebar-accent text-sidebar-accent-foreground; }
+  .dass-rail-btn:focus-visible { box-shadow: var(--dass-ring); outline: none; }
+  .dass-rail-btn[data-active="true"] { background: var(--hover-strong); color: var(--ink); box-shadow: none; }
+  .dass-rail-badge {
+    @apply absolute -top-0.5 -right-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[12px] font-semibold leading-none;
+    background: color-mix(in srgb, var(--dass-needs) 16%, var(--sidebar)); color: var(--dass-needs); box-shadow: 0 0 0 2px var(--sidebar);
+  }
+
+  /* A session: its state, its name and when, and under them what it is doing, in one quiet line. */
+  .dass-row {
+    @apply relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left outline-none transition-colors;
+    transition-duration: var(--dass-fast);
+  }
+  .dass-row:hover, .dass-row[data-menu="true"] { @apply bg-sidebar-accent; }
+  .dass-row:focus-visible { box-shadow: var(--dass-ring); outline: none; }
+  .dass-row[data-active="true"] { @apply bg-sidebar-accent; box-shadow: inset 0 0 0 1px var(--border); }
+  .dass-row[data-active="true"] .dass-row-title { @apply text-sidebar-accent-foreground font-medium; }
+  .dass-row-title { @apply min-w-0 flex-1 truncate text-[13px] text-sidebar-foreground; }
+  .dass-row-sub { @apply flex min-w-0 items-center gap-1.5 pl-[18px] text-[12px] text-[var(--text-muted)]; }
+  /* The row's actions take the time's place on hover, rather than keeping an empty slot beside it: at rest the time sits at
+     the row's right edge (Arun, 2026-10-20). */
+  /* At rest the actions button is out of sight but still in the Tab order, not display:none: hidden that way, Tab from a row
+     landed on nothing and the menu (rename, pin, delete) couldn't be reached from the keyboard (Testing F-21, A11Y-2).
+     Tabbing to it shows it, by the rules below. */
+  .dass-row-act { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .dass-row:hover .dass-row-act, .dass-row:focus-visible .dass-row-act, .dass-row:has(:focus-visible) .dass-row-act, .dass-row[data-menu="true"] .dass-row-act { @apply inline-flex; position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
+  .dass-row:hover .dass-row-time, .dass-row:focus-visible .dass-row-time, .dass-row:has(:focus-visible) .dass-row-time, .dass-row[data-menu="true"] .dass-row-time { @apply hidden; }
+
+  /* State, before the name, as a dashed ring in its state's colour (Arun, 2026-10-19: "the dashed line circle, colour coded, no
+     pulsing"): teal alive, amber waiting on you, red broken, ink done, faint grey quiet. Drawn as a mask, so a class that sets
+     the background (bg-[var(--red)]) colours the ring. Nothing moves. */
+  .dass-dot {
+    @apply relative inline-block shrink-0;
+    background-color: var(--faint);
+    -webkit-mask: var(--dass-ring-mask) center / contain no-repeat;
+    mask: var(--dass-ring-mask) center / contain no-repeat;
+  }
+  .dass-dot[data-state="idle"] { background-color: var(--faint); opacity: .75; }
+  .dass-dot[data-state="working"] { background-color: var(--dass-live); }
+  .dass-dot[data-state="needs"] { background-color: var(--dass-needs); }
+  .dass-dot[data-state="done"] { background-color: var(--dass-ok); }
+  .dass-dot[data-state="bad"] { background-color: var(--red); }
+  .dass-dot[data-state="done"] { background-color: var(--dass-ok); }
+  /* Finished while you were elsewhere, not opened since (unread.ts): its name a step heavier and its dot lit, as a mail list marks new mail. */
+  .dass-row[data-unread] .dass-row-title { font-weight: 600; }
+  .dass-row[data-unread] .dass-dot[data-state="idle"] { background-color: var(--dass-ok); opacity: 1; }
+
+  .dass-kbd { @apply ml-auto rounded-md border border-sidebar-border px-1.5 py-px font-sans text-[12px] text-[var(--text-muted)]; }
+  /* In a tooltip (dark in light mode, light in dark) the chip takes the tooltip's own ink, as the app's other tips do, rather
+     than the sidebar's muted grey that vanished on it (Arun, 2026-10-20). */
+  /* A page's row of controls (PageToolbar): every one 32px, so tabs, search and buttons line up on every page alike. */
+  .dass-toolbar :is([data-slot="tabs-list"], [data-slot="input-group"], [data-slot="button"]:not([data-size^="icon"])) { height: 32px !important; }
+  .dass-toolbar [data-slot="tabs-list"] { padding: 3px !important; }
+  .dass-toolbar [data-slot="input-group-control"] { height: 100% !important; }
+  .dass-toolbar [data-slot="button"]:not([data-size^="icon"]) { padding-inline: 12px !important; font-size: 13px !important; }
+  [data-slot="tooltip-content"] .dass-kbd {
+    display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; vertical-align: 1px;
+    border-color: color-mix(in srgb, currentColor 22%, transparent); background: color-mix(in srgb, currentColor 10%, transparent);
+    color: color-mix(in srgb, currentColor 85%, transparent); font-size: 12px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums;
+  }
+}
+
+/* The ring the state dot is cut from: a circle of short dashes. Sized here, outside the layers, so it wins over a size-2 on the element. */
+:root { --dass-ring-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='9.5' fill='none' stroke='black' stroke-width='3' stroke-dasharray='3.2 3' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.dass-dot { width: 13px !important; height: 13px !important; }
+
+/* Anything that can be pressed shows the pointer (Arun, 2026-10-20): Tailwind v4 dropped it from buttons, so shadcn's buttons and
+   the sidebar's close showed the plain arrow. In the base layer, so a class that sets its own cursor (a quiet, unpressable
+   status item) still wins. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]),
+  [role="menuitemradio"]:not([aria-disabled="true"]),
+  [role="option"]:not([aria-disabled="true"]),
+  summary,
+  label[for] {
+    cursor: pointer;
+  }
+}
+
+
+/* The new session's turning headline keeps two lines' room where it can wrap, so a line that wraps and one that doesn't never
+   move the box under it (Arun, 2026-10-28: "iron everything and ensure we are good… any logic errors and fixes"). */
+@media (max-width: 640px) {
+  .hero-title { min-height: 2lh; display: flex; align-items: flex-end; justify-content: center; }
+}

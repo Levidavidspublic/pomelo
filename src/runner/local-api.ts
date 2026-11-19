@@ -1,0 +1,1128 @@
+import { computerAllow, computerStatus, setComputerUse } from "./computer.js";
+import { readLimits } from "./limits.js";
+import { findApp, forgetLoginStatus, loginStatusQuick } from "./adapters.js";
+import { isUnknown, orElse, probeTool } from "./tool-probe.js";
+import { mkdir, mkdtemp, open, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { homedir, hostname, tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { ENGINE_NAMES, ENGINE_TOOLS, TOOL_INFO, toolList, type EngineMode, type EngineTool } from "../types.js";
+import { ADAPTERS, ANTIGRAVITY_MODELS, antigravityModels, childEnv, findBin, formatCommandLine, isClaudeAppBundled, launcher, loginStatus, noteSignInStarted, readCustomAcp, runCli, saveCustomAcp } from "./adapters.js";
+import { discoverAgentFiles, parseModelList } from "./agent-files.js";
+import { addWorktree, branchesOf, dropSpares, dropWorktree, fetchBranch, primeSpares, remoteBranchesOf, repoInfo, repoItems, startRepo, worktreeState } from "./git.js";
+import { listCliSessions } from "./imports.js";
+import { installFromRegistry, registryRows } from "./acp-registry.js";
+import { acpSignInState, callbackFromElsewhere, cancelAcpSignIn, forgetProof, settleSignIn, startAcpSignIn } from "./acp-signin.js";
+import { grouped, listModels, openConversation } from "./model-lists.js";
+import { holdAwake, knownModels, knownModelsAt, rememberModels, Runner, stayAttached, toolBusy } from "./runner.js";
+import { autoUpdates, checkUpdates, setAutoUpdates, updateTool } from "./tool-updates.js";
+import { builtInKeys } from "./builtin-apps.js";
+import { addConnection, claudeCodeServers, fillDraft, nameFrom, parseConnection, readStore, removeConnection, retestConnection, setClaudeCodeShared, startSignin, updateConnection, viewOf, type Draft } from "./connections.js";
+import { askCli } from "./ask.js";
+import { findWork, shownFile, workKind, workType } from "../work-files.js";
+import { installSkill } from "./tool-commands.js";
+import { listBackground, startBackground, stopBackground } from "./background.js";
+import { listServers, stopServer } from "./ports.js";
+import { fetchPreview, previewOptions, previewStatusLive, startPreview, stopPreview } from "./preview.js";
+import { iosInput, iosRun, iosScreen, iosStatus, iosStop, type IosInput } from "./ios.js";
+import { iosLiveUrl } from "./ios-live.js";
+import { folderSetup, saveEnvironment } from "./environment.js";
+import { cancelLogin, finishLogin, openInTerminal, shellLine, startLogin } from "./terminal.js";
+import { accountEnv, addAccount, DEFAULT_ACCOUNT, getAccount, hasAccounts, isOut, listAccounts, removeAccount, renameAccount, type AccountTool } from "./accounts.js";
+import { browse, cloneRepo, defaultCloneRoot, describe, findByName, ghBin, githubRepos, issues, pullRequests, recentReposCached, teamPullRequests } from "./workspace.js";
+import { githubCancel, githubConnect, githubDisconnect, githubStatus } from "./github.js";
+import { githubItem, localRepo, prAct, prFiles, prReview, type DraftComment, type PrAction } from "./pr-actions.js";
+import { savedDirs, startDirs } from "./extra-dirs.js";
+import { readRepo } from "./repo-read.js";
+import { changedSince, citedLines, lineCounts, readForPage, surveyRepo } from "./dive.js";
+import { addOwnModels, detectLocal, discoverModels, listOwnModels, ownComplete, ownVision, removeOwnModel, saveOwnModel, testOwnModel } from "./own-models.js";
+
+/**
+ * Everything Friday can ask someone's machine to do on their behalf: what
+ * coding CLIs are installed, which repos and past sessions are there, clone
+ * from GitHub, sign a CLI in, and start a runner.
+ *
+ * One implementation, two callers. When Friday runs on your own machine the
+ * server calls this directly; when Friday is hosted, your linked machine runs
+ * the very same code and answers over the link. The hosted UI is then exactly
+ * the local one, because it is asking exactly the same questions.
+ */
+
+export interface MachineInfo {
+  name: string;
+  platform: string;
+  home: string;
+}
+
+/**
+ * The computer's name as its owner gave it, "Arun's Mac Studio" rather than the host name "Aruns-Mac-Studio", read once: what
+ * Settings says first about the computer (audit REST-16, Arun 2026-11-04). Elsewhere, and where it can't be read, the host name.
+ */
+let pretty: string | undefined;
+function prettyName(): string {
+  if (pretty !== undefined) return pretty;
+  pretty = "";
+  if (process.platform === "darwin") {
+    try {
+      pretty = execFileSync("scutil", ["--get", "ComputerName"], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim().slice(0, 60);
+    } catch {
+      // The host name, then.
+    }
+  }
+  return pretty;
+}
+export const machineInfo = (): MachineInfo => ({ name: process.env.FRIDAY_MACHINE_NAME || prettyName() || hostname().replace(/\.local$/i, ""), platform: process.platform, home: homedir() });
+
+export interface HostContext {
+  /** The Friday server runners started here should connect back to. */
+  serverUrl: string;
+  /** Who these runners act as in a session. */
+  user: { id: string; name: string };
+  /** Runners started on this machine, keyed `sessionId|lane`. */
+  runners: Map<string, Runner>;
+  log?: (line: string) => void;
+  /** Word back to whoever asked, before the answer: the agent builder's text as the CLI writes it. */
+  progress?: (value: unknown) => void;
+}
+
+export const HOST_METHODS = [
+  "tools",
+  "folders",
+  "browse",
+  // A folder's files, for "#" in the new-session box before there is a session to ask (audit CODE-9).
+  "tree",
+  "describe",
+  "find",
+  "github",
+  "prs",
+  "prs.team",
+  "issues",
+  "pr.act",
+  "pr.review",
+  // A pull request's files with their diffs, for Code Review's guided tour.
+  "pr.files",
+  "github.status",
+  "github.connect",
+  "github.cancel",
+  "github.disconnect",
+  "github.item",
+  // A folder's GitHub repository's open issues and pull requests, for a new thread to start from (threads.tsx).
+  "repo.items",
+  "repo.local",
+  "models.own.list",
+  "models.own.save",
+  "models.own.addMany",
+  "models.own.remove",
+  "models.own.test",
+  "models.own.discover",
+  "models.own.detect",
+  "models.own.vision",
+  "llm.complete",
+  "skills.install",
+  "sessions",
+  "acp.get",
+  "acp.set",
+  // "Other ACP agent" picked from the ACP registry: its list, and one installed into Friday's own folder (acp-registry.ts).
+  "acp.registry",
+  "acp.install",
+  "login",
+  "login.code",
+  "login.cancel",
+  // Where a sign-in Friday is carrying out stands (Antigravity's, agy-signin.ts), for the page waiting on it.
+  "login.state",
+  "login.verify",
+  // A browser sign-in finished on another device: the address its browser ended on (acp-signin.ts callbackFromElsewhere).
+  "login.callback",
+  "logout",
+  // More than one account of Claude Code or Codex on this computer (accounts.ts).
+  "accounts",
+  "accounts.add",
+  "accounts.rename",
+  "accounts.remove",
+  // The coding tools kept up to date (tool-updates.ts): which are behind, one updated now, and updating by itself on or off.
+  "tools.updates",
+  "tools.update",
+  "tools.updates.auto",
+  // MCP servers set up once and handed to every coding tool here (connections.ts).
+  "connections",
+  "connections.parse",
+  "connections.add",
+  "connections.test",
+  "connections.update",
+  "connections.remove",
+  "connections.claude",
+  "connections.signin",
+  "gh-login",
+  "clone",
+  "start",
+  "stop",
+  // The folders beside its own that a running agent may work in, changed from the chat.
+  "dirs",
+  "worktree.drop",
+  "worktree.state",
+  "agents.discover",
+  "models",
+  "preview.options",
+  "preview.start",
+  "preview.status",
+  "preview.stop",
+  "preview.fetch",
+  // An iOS app on a Mac with Xcode, built and run in a simulator for the Preview panel (ios.ts).
+  "ios.status",
+  "ios.run",
+  "ios.stop",
+  "ios.screen",
+  "ios.input",
+  // The simulator live, on a page this runner serves on 127.0.0.1 (ios-live.ts).
+  "ios.live",
+  // A session's environment on this computer (environment.ts): what is kept for a folder, and its setup run now.
+  "env.save",
+  "env.setup",
+  "background.list",
+  "servers.list",
+  "servers.stop",
+  "background.stop",
+  // One command an agent of yours is running, stopped from the Tasks tab (stop-command.ts).
+  "command.stop",
+  "usage",
+  // A picture, video or sound shown in a hosted session's chat, read a piece at a time (app.ts mediaFromComputer).
+  "workFile",
+] as const;
+export type HostMethod = (typeof HOST_METHODS)[number];
+
+const str = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+
+/**
+ * A directory for an agent that was not given one.
+ *
+ * Under the home folder, per session, so two sessions never share it and it is
+ * obvious where it is. Nothing in it is anybody's work: it exists so the agent
+ * has somewhere to stand while it reads, plans and answers.
+ */
+async function scratchFolder(sid: string, lane: string): Promise<string> {
+  // Per lane as well as per session: the one-writer-per-folder rule would
+  // otherwise refuse a second "no folder" agent for sharing a directory that
+  // holds nothing worth protecting.
+  const clean = (v: string, fallback: string) => v.replace(/[^\w-]/g, "").slice(0, 40) || fallback;
+  const dir = path.join(homedir(), "Friday", "sessions", clean(sid, "session"), clean(lane, "agent"));
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * What a removed agent leaves behind on this computer, cleared: its separate copy, unless it has uncommitted changes (its
+ * branch stays, so what was committed is kept), or its scratch folder, and the session's folder of those once it is empty.
+ */
+async function clearAfter(sid: string, cwd: string, made: { copy: boolean; scratch: boolean }): Promise<void> {
+  if (made.copy) await dropWorktree(cwd, "committed").catch(() => false);
+  if (!made.scratch) return;
+  const sessions = path.join(homedir(), "Friday", "sessions");
+  // Only ever a folder scratchFolder made, never one somebody chose.
+  if (path.dirname(path.dirname(cwd)) !== sessions) return;
+  await rm(cwd, { recursive: true, force: true }).catch(() => {});
+  await rmdir(path.dirname(cwd)).catch(() => {});
+}
+
+/** Words that say what is wanted rather than what it is: "help me build a…" names nothing. */
+const FILLER = new Set(
+  "a an the and or of for to in on with from me my us our i we you your it this that some something very really just please can could would will help make build create write add start new let lets let's want need get do code app quick simple small basic".split(" "),
+);
+
+/**
+ * A folder name from what was asked: its first few words that name something, lowercase, with dashes. Words in any script
+ * ("café menu", "東京 旅行"), not only a–z: a title in another language named every folder "project" (Arun, 2026-10-28: "iron
+ * everything and ensure we are good… any logic errors"). Counted in characters, so a long one is never cut mid-character.
+ */
+export function projectName(ask: string): string {
+  const words = ask
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\s-]/gu, " ")
+    .split(/\s+/)
+    .filter((w) => w && !/^-+$/.test(w) && !FILLER.has(w));
+  const len = (w: string) => Array.from(w).length;
+  let name = "";
+  for (const w of words.slice(0, 4)) {
+    if (name && len(name) + len(w) + 1 > 40) break;
+    name = name ? `${name}-${w}` : Array.from(w).slice(0, 40).join("");
+  }
+  return name || "project";
+}
+
+/**
+ * A project folder for a session started with no folder, the way Claude Code makes one when no folder is picked (Arun,
+ * 2026-10-22: "allow coding tools and agents and stuff create folders when there is no folder when starting a session, like
+ * how claude code does it"). ~/Friday/Projects/<name>, named from what was asked, a new one each time (a -2 after a name
+ * taken), and made a git repository on this computer, so the agents added to the session later each work in a copy of it.
+ *
+ * Unlike scratchFolder above, this is the session's code: the Files tab, the Preview and every agent that joins find it as
+ * they would a folder somebody picked.
+ */
+export async function projectFolder(ask: string, who: { name: string }, root = path.join(homedir(), "Friday", "Projects")): Promise<string> {
+  await mkdir(root, { recursive: true });
+  const base = projectName(ask);
+  for (let n = 1; n <= 200; n++) {
+    const dir = path.join(root, n === 1 ? base : `${base}-${n}`);
+    // Made, not found: one that is already there is somebody's other project.
+    const made = await mkdir(dir).then(
+      () => true,
+      (e: NodeJS.ErrnoException) => {
+        if (e.code === "EEXIST") return false;
+        throw e;
+      },
+    );
+    if (!made) continue;
+    await startRepo(dir, who);
+    return dir;
+  }
+  throw new Error(`Couldn't make a new folder for this in ${root}.`);
+}
+
+/** A sign-in's key, so two accounts of one tool can't take each other's code. */
+const loginKey = (tool: EngineTool, account?: string) => (account ? `${tool}:${account}` : tool);
+
+/** The account a call names, checked to be one of the tool's: undefined for its own sign-in. */
+async function accountParam(tool: EngineTool, v: unknown): Promise<string | undefined> {
+  const id = str(v, 40);
+  if (!id || id === DEFAULT_ACCOUNT || !hasAccounts(tool)) return undefined;
+  if (!(await getAccount(tool, id))) throw new Error(`${ENGINE_NAMES[tool]} has no account called “${id}” here.`);
+  return id;
+}
+
+/** A tool's accounts for its row: only when it has more than one, unless `always`. */
+async function accountRows(tool: AccountTool, bin: string, always = false): Promise<{ accounts?: { id: string; label: string; loggedIn: boolean | null; out?: boolean; outUntil?: number | null }[] }> {
+  const all = await listAccounts(tool);
+  if (all.length < 2 && !always) return {};
+  return {
+    accounts: await Promise.all(
+      all.map(async (a) => ({
+        id: a.id,
+        label: a.label,
+        loggedIn: await loginStatusQuick(tool, bin, 1_500, a.id === DEFAULT_ACCOUNT ? undefined : a.id),
+        ...(isOut(a) ? { out: true, outUntil: a.outUntil ?? null } : {}),
+      })),
+    ),
+  };
+}
+
+/** When each tool's kept model list was last looked at again (see `models`): at most once in ten minutes. */
+const lookedAgain = new Map<string, number>();
+
+export async function callHost(method: string, params: Record<string, unknown> = {}, ctx: HostContext): Promise<unknown> {
+  const home = homedir();
+  // "~\code" is as valid as "~/code" for someone typing on Windows.
+  const at = (p: unknown) => path.resolve(str(p, 600).replace(/^~(?=$|[\\/])/, home) || home);
+  const isDir = (p: string) => stat(p).then((s) => s.isDirectory(), () => false);
+
+  switch (method) {
+    case "tools": {
+      // `tool`: just that one, for a start that only needs to know about the agent it is starting.
+      const one = str(params.tool, 20) as EngineTool;
+      const tools = await Promise.all(
+        // Each tool on its own. Finding it has a deadline: one whose look hangs or throws is unknown on its row (tool-probe.ts).
+        // A tool that was found is listed as found, whatever its sign-in or accounts do.
+        (ENGINE_TOOLS.includes(one) ? [one] : ENGINE_TOOLS).map(async (t) => {
+          const bin = await probeTool(t, () => findBin(t));
+          if (isUnknown(bin)) return bin;
+          // Side by side, each within its own budget: one after the other, a slow sign-in check and then each account's ran
+          // past the look's deadline and a tool someone needed to sign in to couldn't be picked (Fable review, 2026-11-10).
+          const [loggedIn, app, accounts] = await Promise.all([
+            // A slow answer is "don't know yet", not a reason to hold the whole card
+            // back: the check carries on in the background and the next look has it.
+            bin ? orElse(() => loginStatusQuick(t, bin), null) : null,
+            // The app is here though the agent isn't (Cursor's editor, without its CLI).
+            bin ? false : orElse(() => findApp(t), false),
+            // Its accounts here, when it has more than one (accounts.ts): each signed in or not, and out of usage or not.
+            bin && hasAccounts(t) ? orElse(() => accountRows(t, bin), {}) : {},
+          ]);
+          // Installed, but it can't run here (Kilo's ACP on Windows): said on its row rather than found out from a turn.
+          const unavailable = bin ? await orElse(() => ADAPTERS[t].unavailable?.(), undefined) : undefined;
+          return {
+            tool: t,
+            name: ENGINE_NAMES[t],
+            path: bin,
+            loggedIn,
+            // Claude Code bundled in the Claude desktop app signs in separately from the app.
+            source: bin ? (isClaudeAppBundled(bin) ? "claude-app" : "cli") : null,
+            ...(app ? { app: true } : {}),
+            ...(unavailable ? { unavailable } : {}),
+            ...accounts,
+          };
+        }),
+      );
+      const running = [...ctx.runners.values()].map((r) => ({ sid: r.opts.session, lane: r.lane, tool: r.opts.tool, cwd: r.opts.cwd }));
+      return { tools, home, machine: machineInfo(), running };
+    }
+    case "folders":
+      return { home, cloneRoot: defaultCloneRoot(), recent: await recentReposCached() };
+    // Computer use on this computer (computer.ts): off until its owner turns it on, and what the system still needs for it.
+    case "computerUse":
+      return computerStatus();
+    case "computerUse.set":
+      await setComputerUse(params.on === true);
+      return computerStatus();
+    case "computerUse.allow":
+      return computerAllow();
+    // Kept awake between turns for `ms` (the server renewing it while its person is away, or a room of theirs runs on its own):
+    // said on the busy line the desktop app keeps the computer awake by.
+    case "awake": {
+      const ms = Math.max(0, Math.min(Number(params.ms) || 0, 10 * 60_000));
+      holdAwake(ms);
+      return { awake: ms > 0 };
+    }
+    case "browse":
+      return browse(at(params.path));
+    case "tree": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      return { output: await readRepo(p, { op: "tree", mode: "plan" }) };
+    }
+    case "describe": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      // Whether it has uncommitted work is four git processes, so only for whoever asks (`dirty`): every other look at a
+      // folder (finding the session's code, the picker's recent folders) paid for it and never read it.
+      // The folders kept for it (`dirs`), for the picker that offers them again.
+      // Its branches (`branches`), for the new-session page's pick of which one to work on: this checkout's, and origin's as
+      // last fetched. Nothing is fetched, so it is quick and never asks for a password.
+      const [folder, repo, dirs, branches, remote] = await Promise.all([
+        describe(p),
+        params.dirty ? repoInfo(p) : null,
+        params.dirs ? savedDirs(p) : null,
+        params.branches ? branchesOf(p).catch(() => null) : null,
+        params.branches ? remoteBranchesOf(p) : null,
+      ]);
+      const branchList = branches ? [...branches.branches.map((b) => ({ name: b.name, ...(b.elsewhere ? { elsewhere: b.elsewhere } : {}) })), ...(remote ?? []).map((name) => ({ name, remote: true as const }))] : null;
+      // `canAside`: a start can put the agent in a copy on another branch (start's `aside`), so the page offers that rather than
+      // turning a folder with uncommitted work away. A runner without it says nothing, and the page asks for a commit as before.
+      return { folder: { ...folder, ...(repo ? { dirty: repo.dirty, canAside: true } : {}), ...(dirs ? { dirs } : {}), ...(branchList ? { branches: branchList } : {}) } };
+    }
+    case "find":
+      return { matches: await findByName(str(params.name, 200)) };
+    case "github":
+      return githubRepos();
+    case "prs":
+      return pullRequests();
+    case "issues":
+      return issues();
+    case "prs.team":
+      return teamPullRequests((Array.isArray(params.repos) ? params.repos : String(params.repos ?? "").split(",")).map((r) => str(r, 140)).filter(Boolean));
+    // Code Review's buttons: each one something the person pressed, done as them through this computer's GitHub login.
+    case "pr.act":
+      return prAct({
+        url: str(params.url, 300),
+        action: str(params.action, 30) as PrAction,
+        method: str(params.method, 10),
+        body: str(params.body, 8000),
+        head: str(params.head, 64),
+        id: str(params.id, 100),
+        comments: (Array.isArray(params.comments) ? params.comments : []).slice(0, 30).map((c: Record<string, unknown>) => ({ path: str(c?.path, 300), body: str(c?.body, 4000), ...(Number(c?.line) > 0 ? { line: Math.floor(Number(c.line)) } : {}) }) as DraftComment),
+      });
+    case "pr.files":
+      return prFiles({ url: str(params.url, 300) });
+    case "pr.review":
+      return prReview({ url: str(params.url, 300), tool: str(params.tool, 20), model: str(params.model, 60) || undefined });
+    case "github.status":
+      return githubStatus();
+    case "github.connect":
+      return githubConnect(str(params.clientId, 64));
+    case "github.cancel":
+      githubCancel();
+      return githubStatus();
+    case "github.disconnect":
+      return githubDisconnect();
+    case "github.item":
+      return githubItem({ url: str(params.url, 300) });
+    case "repo.local":
+      return localRepo({ repo: str(params.repo, 200) });
+    case "repo.items": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      return repoItems(p);
+    }
+    // Your own models, kept on this computer with their keys (own-models.ts). Nothing here sends a key anywhere but its model's server.
+    case "models.own.list":
+      return listOwnModels();
+    case "models.own.save":
+      return saveOwnModel({
+        ...(str(params.id, 20) ? { id: str(params.id, 20) } : {}),
+        ...(typeof params.name === "string" ? { name: str(params.name, 60) } : {}),
+        ...(typeof params.baseUrl === "string" ? { baseUrl: str(params.baseUrl, 300) } : {}),
+        ...(typeof params.model === "string" ? { model: str(params.model, 200) } : {}),
+        ...(typeof params.apiKey === "string" ? { apiKey: str(params.apiKey, 500) } : {}),
+        ...(typeof params.provider === "string" ? { provider: str(params.provider, 30) } : {}),
+        ...(typeof params.vision === "boolean" ? { vision: params.vision } : {}),
+      });
+    case "models.own.addMany":
+      return addOwnModels({
+        baseUrl: str(params.baseUrl, 300),
+        models: (Array.isArray(params.models) ? params.models : []).slice(0, 500).map((m) => str(m, 200)),
+        ...(typeof params.apiKey === "string" ? { apiKey: str(params.apiKey, 500) } : {}),
+        ...(typeof params.provider === "string" ? { provider: str(params.provider, 30) } : {}),
+        ...(str(params.id, 20) ? { id: str(params.id, 20) } : {}),
+      });
+    case "models.own.vision":
+      return ownVision({ id: str(params.id, 20) });
+    case "models.own.remove":
+      return removeOwnModel({ id: str(params.id, 20) });
+    case "models.own.test":
+      return testOwnModel({ id: str(params.id, 20) });
+    case "models.own.discover":
+      return discoverModels({ baseUrl: str(params.baseUrl, 300), apiKey: str(params.apiKey, 500), id: str(params.id, 20) });
+    case "models.own.detect":
+      return detectLocal();
+    // A step of Friday's agent on one of those models: asked by the server, answered here, the text passed back as it comes.
+    case "llm.complete": {
+      let gathered = "";
+      let thought = "";
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const flush = () => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (gathered || thought) ctx.progress?.({ ...(gathered ? { d: gathered } : {}), ...(thought ? { r: thought } : {}) });
+        gathered = thought = "";
+      };
+      const soon = () => (timer ??= setTimeout(flush, 60));
+      try {
+        return await ownComplete(
+          {
+            id: str(params.id, 20),
+            system: typeof params.system === "string" ? params.system : "",
+            messages: Array.isArray(params.messages) ? (params.messages as never) : [],
+            tools: Array.isArray(params.tools) ? (params.tools as never) : [],
+            ...(str(params.reasoningEffort, 10) ? { reasoningEffort: str(params.reasoningEffort, 10) } : {}),
+          },
+          ctx.progress ? { delta: (t) => ((gathered += t), soon()), reasoning: (t) => ((thought += t), soon()) } : {},
+        );
+      } finally {
+        flush();
+      }
+    }
+    case "skills.install": {
+      const tools = (Array.isArray(params.tools) ? params.tools : []).filter((t): t is EngineTool => ENGINE_TOOLS.includes(t as EngineTool));
+      const name = str(params.name, 60);
+      const instructions = str(params.instructions, 20_000);
+      if (!name || !instructions || !tools.length) throw new Error("Which skill, and which of your tools?");
+      return installSkill({ name, description: str(params.description, 300), instructions }, tools);
+    }
+    case "sessions": {
+      const tool = str(params.tool, 20) as EngineTool;
+      return listCliSessions({ tools: ENGINE_TOOLS.includes(tool) ? [tool] : undefined });
+    }
+    // The agent for "Other ACP agent", as a command line.
+    case "acp.get": {
+      const set = await readCustomAcp();
+      return { line: set ? formatCommandLine(set.command, set.args) : "" };
+    }
+    case "acp.set": {
+      const set = await saveCustomAcp(str(params.line, 1000));
+      return { ok: true, found: set ? !!(await findBin("acp")) : false };
+    }
+    case "acp.registry":
+      return { agents: await registryRows() };
+    case "acp.install": {
+      const got = await installFromRegistry(str(params.id, 64));
+      const set = await saveCustomAcp(got.line);
+      return { ok: true, line: got.line, name: got.name, version: got.version, found: set ? !!(await findBin("acp")) : false };
+    }
+    case "login": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      const bin = await findBin(tool);
+      if (!bin) throw new Error(`${ENGINE_NAMES[tool]} isn't installed on this machine.`);
+      // Signing in to one of its accounts (accounts.ts) is the same sign-in, pointed at that account's folder.
+      const account = await accountParam(tool, params.account);
+      const env = accountEnv(tool, account);
+      noteSignInStarted(tool);
+      const a = ADAPTERS[tool];
+      // A sign-in run in a terminal: inside Friday, in its own terminal under the tool's row, when the page can draw one on this
+      // computer (the line to type, its shell ending with it, so its end says it is over), or a terminal window of its own.
+      // `verify`: once it is over, a conversation proves it (login.verify).
+      const inTerminal = async (run: string[], vars: Record<string, string>) =>
+        params.inApp === true
+          ? { inApp: true, line: shellLine(run, vars, process.platform, undefined, true), command: shellLine(run, vars), verify: true }
+          : { ...(await openInTerminal(run, vars)), verify: true };
+      // A tool spoken to over ACP with no login command of its own (and Antigravity) signs in by the ways it says it has
+      // (acp-signin.ts): a sign-in it does itself, its page handed to the page, or its own terminal sign-in.
+      if (a.interactive && !a.dialect && !a.perTurn && !account && (!a.login.length || tool === "antigravity")) {
+        const r = await startAcpSignIn(tool, bin);
+        if ("terminal" in r) return inTerminal(r.terminal.argv, { ...env, ...r.terminal.env });
+        if (!("fixed" in r) && !("fallback" in r)) return { ...(r.url ? { url: r.url } : {}), ...(r.open ? { open: true } : {}), command: [a.bins[0], ...a.login].join(" "), opened: true, browser: true };
+      }
+      const how = await launcher(bin);
+      const argv = [how.command, ...how.prefix, ...a.login];
+      const terminal = () => inTerminal(argv, env);
+      // The tools spoken to over ACP sign in their own ways (a device code typed on the vendor's site, a choice of provider, the
+      // tool itself asking as it starts), none of them a code pasted back here: their own terminal shows whatever they ask.
+      if (ADAPTERS[tool].interactive || !ADAPTERS[tool].login.length) return terminal();
+      // A sign-in is a web page, so hand back the link. Only if the CLI
+      // prints none does this fall back to opening a terminal.
+      const started = await startLogin(loginKey(tool, account), argv, { env: { ...childEnv(), ...how.env, ...env } });
+      // The CLI opens the page itself and then waits on stdin for the code it
+      // shows. So the link comes back to be offered, not opened — opening it
+      // here is the second browser people were getting — and the sign-in stays
+      // running until "login.code" hands it what they pasted.
+      if (started.url) return { url: started.url, command: started.command, opened: true, needsCode: true };
+      return terminal();
+    }
+    // A coding tool's install line, run in a Terminal window of the person's own when they press Run in Terminal beside it:
+    // the line is the tool's own, looked up here by the tool's name, never one the page sends (Arun, 2026-10-30: the first
+    // minutes after install are where people quit, and a line to copy into a terminal is one of the places).
+    case "install": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      const i = TOOL_INFO[tool].install;
+      const win = process.platform === "win32";
+      if (i.npm) return openInTerminal(["npm", "install", "-g", i.npm]);
+      const line = win ? i.windows : i.unix;
+      if (!line) throw new Error(`${ENGINE_NAMES[tool]} has no install line for this system. Its documentation says how.`);
+      return openInTerminal(win ? ["powershell", "-NoProfile", "-Command", line] : ["bash", "-lc", line]);
+    }
+    // The code from that page. The CLI judges it; this only carries it.
+    case "login.code": {
+      forgetLoginStatus();
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      const code = str(params.code, 400);
+      if (!code) throw new Error("Paste the code the sign-in page showed.");
+      const account = await accountParam(tool, params.account);
+      const r = await finishLogin(loginKey(tool, account), code);
+      if (!r.ok) throw new Error(r.output || "That code wasn't accepted. Start the sign-in again.");
+      const bin = await findBin(tool);
+      return { ok: true, loggedIn: bin ? await loginStatus(tool, bin, account) : null };
+    }
+    case "login.state": {
+      const tool = str(params.tool, 20) as EngineTool;
+      return { state: ENGINE_TOOLS.includes(tool) ? acpSignInState(tool) : null };
+    }
+    // A sign-in that ran in a terminal is over: proven by a conversation that opens, for a tool spoken to over ACP (T3 Code's
+    // way), and by the tool's own check for the others.
+    case "login.verify": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      const bin = await findBin(tool);
+      if (!bin) throw new Error(`${ENGINE_NAMES[tool]} isn't installed on this machine.`);
+      forgetLoginStatus();
+      const a = ADAPTERS[tool];
+      if (!a.interactive || a.dialect || a.perTurn) {
+        const now = await loginStatus(tool, bin);
+        return now === false ? { ok: false, error: `${ENGINE_NAMES[tool]} still says it isn't signed in.` } : { ok: true };
+      }
+      const r = await openConversation(tool, bin, 45_000);
+      const error = r.ok ? undefined : `${ENGINE_NAMES[tool]} didn't open a conversation after signing in: ${r.error}`;
+      settleSignIn(tool, r.ok, error);
+      if (r.models.length) rememberModels(tool, r.models);
+      return r.ok ? { ok: true } : { ok: false, error };
+    }
+    case "login.callback": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      await callbackFromElsewhere(tool, str(params.url, 8_000));
+      return { ok: true };
+    }
+    case "login.cancel": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (ENGINE_TOOLS.includes(tool)) cancelAcpSignIn(tool);
+      if (ENGINE_TOOLS.includes(tool)) cancelLogin(loginKey(tool, await accountParam(tool, params.account).catch(() => undefined)));
+      return { ok: true };
+    }
+    // Signing out needs no browser, so it happens here rather than in a
+    // terminal. It signs that CLI out on this machine for every use of it,
+    // not just Friday's — which is why the UI asks first.
+    case "logout": {
+      forgetLoginStatus();
+      forgetProof(str(params.tool, 20) as EngineTool);
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      const bin = await findBin(tool);
+      if (!bin) throw new Error(`${ENGINE_NAMES[tool]} isn't installed on this machine.`);
+      if (!ADAPTERS[tool].logout.length) throw new Error(`${ENGINE_NAMES[tool]} has no command to sign out with. Sign out in ${ENGINE_NAMES[tool]} itself.`);
+      const account = await accountParam(tool, params.account);
+      const r = await runCli(bin, ADAPTERS[tool].logout, 20_000, accountEnv(tool, account));
+      const still = await loginStatus(tool, bin, account);
+      if (still === true) throw new Error(`${ENGINE_NAMES[tool]} is still signed in${r.out ? `: ${r.out.slice(0, 200)}` : "."}`);
+      return { ok: true, output: r.out.slice(0, 400) };
+    }
+    // Claude Code's and Codex's accounts on this computer, each signed in or not (accounts.ts).
+    case "accounts": {
+      const one = str(params.tool, 20) as EngineTool;
+      const tools = (hasAccounts(one) ? [one] : (["claude", "codex"] as AccountTool[])) as AccountTool[];
+      const out: Record<string, unknown> = {};
+      for (const t of tools) {
+        const bin = await findBin(t);
+        out[t] = bin ? (await accountRows(t, bin, true)).accounts : (await listAccounts(t)).map((a) => ({ id: a.id, label: a.label, loggedIn: null }));
+      }
+      return { accounts: out };
+    }
+    // A new account, named: its folder made, and its sign-in started as "login" starts one, so the person goes straight to it.
+    case "accounts.add": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!hasAccounts(tool)) throw new Error(`${ENGINE_NAMES[tool] ?? "That agent"} keeps one account on a computer. Claude Code and Codex can have more.`);
+      if (!(await findBin(tool))) throw new Error(`${ENGINE_NAMES[tool]} isn't installed on this machine.`);
+      const account = await addAccount(tool, str(params.label, 40));
+      forgetLoginStatus();
+      const login = (await callHost("login", { tool, account: account.id }, ctx)) as Record<string, unknown>;
+      return { account, login };
+    }
+    case "accounts.rename": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!hasAccounts(tool)) throw new Error("Unknown account.");
+      await renameAccount(tool, str(params.id, 40), str(params.label, 40));
+      return { ok: true };
+    }
+    // Gone from this computer: signed out first, so Claude Code's keychain item goes with it, then its folder.
+    case "accounts.remove": {
+      const tool = str(params.tool, 20) as EngineTool;
+      const id = str(params.id, 40);
+      if (!hasAccounts(tool) || !(await getAccount(tool, id))) throw new Error("There's no such account.");
+      if (id === DEFAULT_ACCOUNT) throw new Error("That's the tool's own sign-in. Sign out of it instead.");
+      const using = [...ctx.runners.values()].find((r) => r.opts.tool === tool && r.opts.account === id);
+      if (using) throw new Error(`An agent in a session is running on that account. Stop it first.`);
+      const bin = await findBin(tool);
+      if (bin) await runCli(bin, ADAPTERS[tool].logout, 20_000, accountEnv(tool, id)).catch(() => null);
+      await removeAccount(tool, id);
+      forgetLoginStatus();
+      return { ok: true };
+    }
+    // MCP servers set up once for every coding tool here (connections.ts). The page is never sent their keys, only their names.
+    case "connections": {
+      const st = await readStore();
+      const mine = await claudeCodeServers();
+      // builtInApps: the providers Friday signs in to with its own app, so the page asks for no app of the person's (builtin-apps.ts).
+      return { servers: st.servers.map(viewOf), claudeCode: !!st.claudeCode, claudeCodeNames: Object.keys(mine), builtInApps: builtInKeys() };
+    }
+    case "connections.parse":
+      return { drafts: parseConnection(str(params.text, 20_000)) };
+    case "connections.add": {
+      const d = params.draft as Draft | undefined;
+      if (!d || typeof d !== "object" || !["stdio", "http", "sse"].includes(String(d.transport))) throw new Error("Paste the server again.");
+      const values = params.values && typeof params.values === "object" ? (params.values as Record<string, string>) : {};
+      return { server: viewOf(await addConnection(fillDraft(d, values))) };
+    }
+    case "connections.test":
+      return { server: viewOf(await retestConnection(str(params.id, 40))) };
+    case "connections.update": {
+      const p = {
+        ...(typeof params.enabled === "boolean" ? { enabled: params.enabled } : {}),
+        ...(str(params.name, 60) ? { name: str(params.name, 60) } : {}),
+        ...(params.env && typeof params.env === "object" ? { env: params.env as Record<string, string> } : {}),
+        ...(params.headers && typeof params.headers === "object" ? { headers: params.headers as Record<string, string> } : {}),
+      };
+      const c = await updateConnection(str(params.id, 40), p);
+      // New keys are tested at once: "Fix the keys" ends in whether they work.
+      return { server: viewOf(p.env || p.headers ? await retestConnection(c.id) : c) };
+    }
+    case "connections.remove":
+      await removeConnection(str(params.id, 40));
+      return { ok: true };
+    // A sign-in to a remote server (OAuth): where to send the person's browser, which comes back to this Friday (app.ts).
+    case "connections.signin": {
+      const url = str(params.url, 2000);
+      if (!/^https?:\/\//i.test(url)) throw new Error("That isn't a server's address.");
+      const clientId = str(params.clientId, 400);
+      const r = await startSignin({
+        url,
+        name: str(params.name, 60) || nameFrom(url),
+        ...(str(params.catalog, 60) ? { catalog: str(params.catalog, 60) } : {}),
+        ...(str(params.id, 40) ? { id: str(params.id, 40) } : {}),
+        redirect: `${ctx.serverUrl.replace(/\/+$/, "")}/api/mcp/signed-in`,
+        ...(clientId ? { client: { id: clientId, secret: str(params.clientSecret, 400) } } : {}),
+      }).catch((e: Error & { needsClient?: boolean }) => {
+        throw Object.assign(new Error(e.message), e.needsClient ? { needsClient: true } : {});
+      });
+      return r;
+    }
+    case "connections.claude":
+      await setClaudeCodeShared(params.on === true);
+      return { ok: true };
+    case "tools.updates":
+      return { auto: await autoUpdates(), tools: await checkUpdates() };
+    case "tools.update": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error("Unknown coding agent.");
+      if (toolBusy(tool)) throw new Error(`${ENGINE_NAMES[tool]} is working on a turn. Update it when it's done.`);
+      forgetLoginStatus();
+      return { update: await updateTool(tool) };
+    }
+    case "tools.updates.auto":
+      await setAutoUpdates(params.on !== false);
+      return { auto: await autoUpdates() };
+    case "gh-login": {
+      const gh = await ghBin();
+      if (!gh) throw new Error("The GitHub CLI (gh) isn't installed. Install it from cli.github.com, then try again.");
+      return openInTerminal([gh, "auth", "login"]);
+    }
+    case "clone": {
+      const parent = str(params.parent, 600);
+      return { folder: await cloneRepo(str(params.repo, 400), parent ? at(parent) : undefined) };
+    }
+    case "start": {
+      // A lane brought back by itself (the page's quiet reconnect, `ifOffline`) that this computer already has attached, or on its
+      // way back (stayAttached keeps it here while it waits to retry): left as it is. Started again, it took the lane from the
+      // runner already on it, mid-turn, once for every window that asked.
+      const kept = params.ifOffline === true && str(params.lane, 40) ? ctx.runners.get(`${str(params.sid, 64)}|${str(params.lane, 40)}`) : undefined;
+      if (kept && !kept.stopped) return { lane: kept.lane, laneName: kept.laneName, already: true };
+      // No tool is a folder lent to the session with no CLI behind it: Friday's
+      // own agent reads, edits and runs commands in it through this runner.
+      const tool = str(params.tool, 20) as EngineTool | "";
+      if (tool && !ENGINE_TOOLS.includes(tool)) throw new Error(`Pick ${toolList()}.`);
+      const sid = str(params.sid, 64);
+      /**
+       * No folder, on purpose.
+       *
+       * Somebody joining a session from another computer does not have the
+       * folder it is working in, and should still be able to bring their own
+       * agent into it. That agent needs a directory to stand in, and `at()` of
+       * an empty path is the home directory — so "no folder" has to be said
+       * explicitly and given a place of its own, rather than left to fall
+       * through to somebody's home.
+       */
+      const noFolder = params.noFolder === true && !str(params.cwd, 600);
+      if (!noFolder && !str(params.cwd, 600)) throw new Error("Which folder should it work in?");
+      // With what was asked (`project`), a session's first agent gets a project folder of its own to build in; without, an
+      // agent joining from elsewhere gets somewhere to stand.
+      const project = noFolder ? str(params.project, 400) : "";
+      // Only somewhere to stand, not anybody's code: no spare copies, no setup run.
+      const scratch = noFolder && !project;
+      let cwd = project ? await projectFolder(project, ctx.user) : noFolder ? await scratchFolder(sid, str(params.lane, 40) || str(params.newLane, 40)) : at(params.cwd);
+      // A teammate's own folder on this computer, started from another computer's Friday (local/computers.ts): made if it isn't
+      // there yet, as that Friday makes one on its own computer. Under ~/Friday only: nothing else is made from afar.
+      if (params.makeDir === true && cwd.startsWith(path.join(homedir(), "Friday") + path.sep) && !(await isDir(cwd))) await mkdir(cwd, { recursive: true });
+      if (!(await isDir(cwd))) throw new Error(`There's no folder at ${cwd}.`);
+      // A racing agent works in a checkout of its own, cut from the folder as it is now.
+      let raceBranch = "";
+      // The copy's repository as it was made, and what its .worktreeinclude names, still to come (addWorktree).
+      let made: Awaited<ReturnType<typeof addWorktree>> | null = null;
+      // Where a separate copy came from, so its work can be brought back there (Apply).
+      // Started again in a copy it already has (Reconnect, or a new mode or model from the page): said by the page, since the
+      // copy can't say what it was cut from, and without it Apply went away for that agent.
+      let copyOf = params.worktree ? "" : str(params.copyOf, 600);
+      // The folders beside it that its tool may work in too, as chosen now or as kept for the folder it was started from.
+      // Before any copy is made, so a folder refused here leaves none behind. A teammate's own folder among them, started from
+      // another computer's Friday, is made as its working folder is (makeDir, under ~/Friday only): a teammate with a project
+      // there never started, for its own folder that nothing had made (2026-11-04 linking test).
+      if (params.makeDir === true && Array.isArray(params.dirs))
+        for (const raw of params.dirs.slice(0, 8)) {
+          const d = typeof raw === "string" && raw.trim() ? at(raw) : "";
+          if (d.startsWith(path.join(homedir(), "Friday", "teammates") + path.sep) && !(await isDir(d))) await mkdir(d, { recursive: true });
+        }
+      const dirs = await startDirs(params.dirs, copyOf || cwd, at);
+      if (params.worktree) {
+        // A folder never put in git is made a repository first, on this computer only (startRepo): a copy is a git worktree.
+        if (!(await repoInfo(cwd))) await startRepo(cwd, { name: ctx.user.name });
+        copyOf = cwd;
+        // Set aside: a copy on the branch the person picked (or a new one from it), the folder's uncommitted work left where it is.
+        const ref = (v: unknown, n: number) => (/^[\w./-]+$/.test(str(v, n)) && !str(v, n).startsWith("-") ? str(v, n) : "");
+        const aside = params.aside && typeof params.aside === "object" ? (params.aside as Record<string, unknown>) : null;
+        const on = aside && ref(aside.branch, 108) ? { branch: ref(aside.branch, 108), ...(ref(aside.base, 108) ? { base: ref(aside.base, 108) } : {}) } : undefined;
+        // A pull request's branch, started on from New thread: fetched from origin first, so a branch only pushed is here too.
+        if (on && !on.base && aside?.fetch === true) await fetchBranch(cwd, on.branch);
+        const w = await addWorktree(cwd, params.worktree === "lane" ? str(params.newLane, 40) || str(params.copyName, 40) || "agent" : undefined, params.carry === true, on).catch((e: Error) => {
+          throw new Error(on ? `Couldn't make a separate copy on ${on.branch}: ${e.message}` : `Couldn't make a separate copy to race in: ${e.message}`);
+        });
+        cwd = w.path;
+        raceBranch = w.branch;
+        made = w;
+      }
+      const runner = new Runner({
+        server: ctx.serverUrl,
+        session: sid,
+        invite: str(params.invite, 400),
+        userId: ctx.user.id,
+        name: ctx.user.name,
+        actorToken: str(params.actorToken, 400) || undefined,
+        ...(tool ? { tool } : {}),
+        cwd,
+        ...(copyOf ? { copyOf } : {}),
+        // Brought back by itself (the page's quiet reconnect, the server as this computer links): the lane coming back after a
+        // drop, as stayAttached's own retries are. Its tool isn't started warm, a few hundred MB for a lane nobody may give a
+        // turn, and its base is the one it had; a dozen lanes coming back at launch would otherwise start a dozen CLIs.
+        ...(params.ifOffline === true ? { reattach: true } : {}),
+        // In the folder beside an agent already editing it, by choice, with no copy made (EngineInfo.shared).
+        ...(params.share === true && !params.worktree ? { share: true } : {}),
+        ...(dirs.length ? { dirs } : {}),
+        ...(made ? { repo: made.repo, ...(made.include ? { include: made.include } : {}) } : {}),
+        // Auto when none is said: what every agent starts in (Arun, 2026-10-18).
+        mode: (["plan", "edits", "full"].includes(String(params.mode)) ? params.mode : "full") as EngineMode,
+        // Chosen automatically for the host's own work: what was picked by hand, which everyone else's turns are held to.
+        ...(["plan", "edits", "full"].includes(String(params.handMode)) ? { handMode: params.handMode as EngineMode } : {}),
+        lane: str(params.lane, 40) || undefined,
+        newLane: str(params.newLane, 40) || undefined,
+        branch: raceBranch || str(params.branch, 100) || undefined,
+        // Where a branch that has to be made starts: the one picked on the new-session page (runner.ts branchFrom).
+        ...(!raceBranch && str(params.branch, 100) && /^[\w./-]{1,108}$/.test(str(params.branchFrom, 108)) && !str(params.branchFrom, 108).startsWith("-") ? { branchFrom: str(params.branchFrom, 108) } : {}),
+        ...(!raceBranch && str(params.followBranch, 100) ? { followBranch: str(params.followBranch, 100) } : {}),
+        // One of that CLI's own models, if the person picked one.
+        model: str(params.model, 60) || undefined,
+        // Which of its accounts here (accounts.ts), if the person picked one.
+        ...(tool && hasAccounts(tool) && str(params.account, 40) ? { account: str(params.account, 40) } : {}),
+        // Continuing one of this CLI's own past conversations.
+        resumeId: str(params.resumeId, 100) || undefined,
+        // A hand-off's: resumed only if this machine has it (Runner.start).
+        ...(params.resumeIfHere === true ? { resumeIfHere: true } : {}),
+        // Picked from a shared link: the conversation is still open where it was shared, so carry on from a copy of it.
+        ...(params.resumeFork === true ? { resumeFork: true } : {}),
+        resumeTitle: str(params.resumeTitle, 120) || undefined,
+        resumeMessages: Number(params.resumeMessages) || undefined,
+        ...(["claude", "codex", "cursor"].includes(String(params.resumeTool)) ? { resumeTool: params.resumeTool as EngineTool } : {}),
+        // An explicit binary, for people whose CLI lives somewhere unusual.
+        bin: str(params.bin, 600) || undefined,
+        ...(str(params.keepAs, 40) ? { keepAs: str(params.keepAs, 40) } : {}), // a teammate's conversation, kept by who it is
+        log: ctx.log ? (l) => ctx.log!(`[${sid}] ${l}`) : undefined,
+      });
+      await runner.start().catch(async (e) => {
+        if (params.worktree) await dropWorktree(cwd);
+        throw e;
+      });
+      const key = `${sid}|${runner.lane}`;
+      ctx.runners.get(key)?.stop();
+      ctx.runners.set(key, runner);
+      // Connected again by itself after a deploy, a restart or a dropped network, to the same lane, until the server turns it
+      // away or it is stopped here. The list always holds the current one, so Stop reaches it even while it waits to retry.
+      let current = runner;
+      void stayAttached(runner, (r) => {
+        current = r;
+        ctx.runners.set(key, r);
+      }).then((end) => {
+        if (ctx.runners.get(key) === current) ctx.runners.delete(key);
+        // Nothing attached on this machine any more: the spare copies made for the next one go with the last.
+        if (!ctx.runners.size) void dropSpares();
+        // The agent removed, or its session deleted (4004): what was made on this computer for it goes too (Arun, 2026-10-25:
+        // "make sure deleting sessions and stuff clears up storage on the machine too").
+        if (end.code === 4004) void clearAfter(sid, cwd, { copy: !!made || !!copyOf, scratch });
+      });
+      // A spare copy of the folder, made in the background now the lane is there, for whoever brings a second tool to it.
+      if (!params.worktree && !scratch) void primeSpares(cwd);
+      // The folder's setup command, when it is set to run whenever an agent starts here (Environment): left running, in Tasks.
+      if (!scratch) {
+        const { setup, autoSetup } = folderSetup(cwd);
+        if (autoSetup) void startBackground(cwd, setup).catch((e: Error) => ctx.log?.(`[${sid}] setup didn't start: ${e.message}`));
+      }
+      return {
+        lane: runner.lane,
+        laneName: runner.laneName,
+        ...(raceBranch ? { cwd, branch: raceBranch } : {}),
+        ...(params.work === true ? { cwd } : {}), // where a Work session's teammate joins it (client/WorkMode.tsx)
+        // Whether it is on the session's branch as pushed, so the person is told what came along rather than what was hoped.
+        ...(runner.opts.followBranch ? { followed: runner.followed } : {}),
+      };
+    }
+    // Running the project: only scripts it already declares, or Friday's own
+    // file server for a folder of HTML. Never a command someone typed.
+    // What each CLI says about its own limits, read here and shown by the page; nothing leaves the machine but the numbers.
+    // One question to the person's own CLI, for the agent builder: plan mode, a scratch folder, text back.
+    // A picture, video or sound a teammate showed in a hosted session's chat, read here a piece at a time for the hosted Friday to
+    // show (app.ts mediaFromComputer; Arun, 2026-10-31: "make sure the crews can also handle like the work stuff too like sending
+    // videos"): only those kinds, and only in the folders the session's lanes work in on this computer.
+    case "workFile": {
+      const roots = (Array.isArray(params.roots) ? params.roots : []).filter((r): r is string => typeof r === "string" && path.isAbsolute(r)).slice(0, 20);
+      const abs = typeof params.abs === "string" ? params.abs.slice(0, 1000) : "";
+      const rel = typeof params.path === "string" ? params.path.slice(0, 600) : "";
+      let file = abs ? await shownFile(abs, roots) : null;
+      if (!file && !abs) file = await findWork(roots, rel);
+      if (!file || !["image", "video", "audio"].includes(workKind(file) ?? "")) throw new Error(`${abs || rel} isn't a picture, video or sound in this session's ${roots.length} folder${roots.length === 1 ? "" : "s"}.`);
+      const { size, mtimeMs } = await stat(file);
+      const offset = Math.max(0, Math.floor(Number(params.offset) || 0));
+      const length = Math.min(4 * 1024 * 1024, Math.max(0, Math.floor(Number(params.length) || 0)), Math.max(0, size - offset));
+      const fh = await open(file, "r");
+      try {
+        const buf = Buffer.alloc(length);
+        if (length) await fh.read(buf, 0, length, offset);
+        return { size, mtime: Math.floor(mtimeMs), type: workType(file), data: buf.toString("base64") };
+      } finally {
+        await fh.close();
+      }
+    }
+    case "ask": {
+      const tool = str(params.tool, 20) as EngineTool;
+      if (!ENGINE_TOOLS.includes(tool)) throw new Error(`Pick ${toolList()}.`);
+      // The answer as it is written, gathered for a moment at a time so a fast CLI is not a message per word. Whatever is
+      // still gathered goes before the answer does, so the asker has every piece before the whole.
+      let gathered = "";
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const flush = () => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (gathered) ctx.progress?.({ text: gathered });
+        gathered = "";
+      };
+      const onText = ctx.progress
+        ? (chunk: string) => {
+            gathered += chunk;
+            timer ??= setTimeout(flush, 60);
+          }
+        : undefined;
+      try {
+        // `cwd`: a repo on this computer, for Deep Dive (still plan mode); `timeoutMs`: a page reads many files, so minutes.
+        const cwd = str(params.cwd, 600) ? at(params.cwd) : undefined;
+        if (cwd && !(await isDir(cwd))) throw new Error(`There's no folder at ${cwd}.`);
+        const timeoutMs = Math.min(Math.max(Number(params.timeoutMs) || 0, 0), 15 * 60_000) || undefined;
+        return await askCli({ tool, system: str(params.system, 40_000), prompt: str(params.prompt, 120_000), ...(str(params.model, 60) ? { model: str(params.model, 60) } : {}), ...(cwd ? { cwd } : {}), ...(timeoutMs ? { timeoutMs } : {}) }, onText);
+      } finally {
+        flush();
+      }
+    }
+    // Deep Dive (deep-dive.ts, runner/dive.ts): a repo's shape, its cited files' lengths, and the lines a citation points at.
+    case "dive.survey": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      return { survey: await surveyRepo(p) };
+    }
+    case "dive.lines": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      return { counts: await lineCounts(p, Array.isArray(params.files) ? params.files.filter((f): f is string => typeof f === "string").slice(0, 400) : []) };
+    }
+    case "dive.files": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      return { files: await readForPage(p, Array.isArray(params.files) ? params.files.filter((f): f is string => typeof f === "string").slice(0, 12) : []) };
+    }
+    case "dive.changed": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      return await changedSince(p, str(params.since, 64));
+    }
+    case "dive.read": {
+      const p = at(params.path);
+      if (!(await isDir(p))) throw new Error(`There's no folder at ${p}.`);
+      const start = Math.max(1, Math.floor(Number(params.start) || 1));
+      return await citedLines(p, str(params.file, 400), start, Math.max(start, Math.floor(Number(params.end) || start)));
+    }
+    case "usage":
+      return readLimits();
+    case "preview.options":
+      return previewOptions(at(params.cwd));
+    case "preview.start":
+      return { preview: await startPreview(at(params.cwd), str(params.script, 40) || undefined) };
+    case "preview.status":
+      return { preview: await previewStatusLive(at(params.cwd)) };
+    case "preview.stop":
+      return { stopped: stopPreview(at(params.cwd)) };
+    // What the agent left running, for the Tasks panel: what each has printed lately, and a way to stop it.
+    case "background.list":
+      return { tasks: listBackground(at(params.cwd)).map((t) => ({ ...t, log: t.log.slice(-30) })) };
+    // Every web server running for this folder, whoever started it (ports.ts): the Preview's server menu and the
+    // Environment's "running" list read this, not only what Friday itself started.
+    case "servers.list":
+      return { servers: await listServers(at(params.cwd)) };
+    // Its stop button in the same menu.
+    case "servers.stop":
+      return await stopServer(at(params.cwd), Number(params.port) || 0);
+    case "background.stop": {
+      const stopped = await stopBackground(at(params.cwd), str(params.id, 20));
+      return { task: stopped ? { ...stopped, log: stopped.log.slice(-30) } : null };
+    }
+    case "preview.fetch":
+      return fetchPreview(Number(params.port) || 0, str(params.path, 2000) || "/", params.headers);
+    case "ios.status":
+      return { ios: await iosStatus(at(params.cwd)) };
+    case "ios.run":
+      return { build: await iosRun(at(params.cwd), { project: str(params.project, 400) || undefined, scheme: str(params.scheme, 200) || undefined, udid: str(params.udid, 60) || undefined }) };
+    case "ios.stop":
+      return { stopped: iosStop(at(params.cwd)) };
+    case "ios.screen":
+      return iosScreen(str(params.udid, 60));
+    case "env.save": {
+      const vars = params.vars && typeof params.vars === "object" ? (params.vars as Record<string, string | null>) : undefined;
+      return { saved: saveEnvironment(at(params.cwd), { ...(typeof params.setup === "string" ? { setup: params.setup } : {}), ...(typeof params.autoSetup === "boolean" ? { autoSetup: params.autoSetup } : {}), ...(typeof params.ownDb === "boolean" ? { ownDb: params.ownDb } : {}), ...(vars ? { vars } : {}) }) };
+    }
+    case "env.setup": {
+      const cwd = at(params.cwd);
+      const { setup } = folderSetup(cwd);
+      if (!setup) throw new Error("There's no setup command for this folder yet.");
+      const started = await startBackground(cwd, setup);
+      return { task: { ...started, log: started.log.slice(-30) } };
+    }
+    case "ios.live":
+      return iosLiveUrl(str(params.udid, 60));
+    case "ios.input":
+      return iosInput(str(params.udid, 60), (params.input ?? {}) as IosInput);
+    case "worktree.drop":
+      return { dropped: await dropWorktree(str(params.path, 600), params.force !== false) };
+    case "agents.discover": {
+      // The person's own agent files, and those of the folders they have worked in: nothing else is looked at.
+      const roots = Array.isArray(params.roots) ? params.roots.slice(0, 12).map((r) => at(r)) : [];
+      const dirs: string[] = [];
+      for (const r of roots) if (await isDir(r)) dirs.push(r);
+      return { found: await discoverAgentFiles(dirs) };
+    }
+    case "models": {
+      // Cursor's list is per-account and long enough to ask it for. A tool spoken to over ACP lists its own as a conversation
+      // opens, and the last list it gave is what the picker offers (see knownModels); Claude Code's, Codex's and Amp's are in it already.
+      const tool = str(params.tool, 20);
+      // Antigravity's before its first conversation here: `agy models`, as its ACP option names them (Arun, 2026-11-06: "make sure
+      // models can be selected"). Its own list over ACP is kept from then on.
+      if (tool === "antigravity") {
+        const known = await knownModels("antigravity");
+        if (known.length) return { models: known };
+        const bin = await findBin("antigravity");
+        const r = bin ? await runCli(bin, ANTIGRAVITY_MODELS, 15_000, {}, "antigravity").catch(() => null) : null;
+        return { models: r && r.code === 0 ? antigravityModels(r.out) : [] };
+      }
+      if (tool !== "cursor") {
+        if (!(ENGINE_TOOLS as string[]).includes(tool) || !ADAPTERS[tool as EngineTool].interactive || ADAPTERS[tool as EngineTool].dialect) return { models: [] };
+        // The list its last conversation gave, or, before it has had one here, the tool asked (model-lists.ts): kept as a
+        // conversation's would be, and replaced by the one its next conversation gives.
+        const known = await knownModels(tool as EngineTool);
+        if (known.length) {
+          // Kept, and looked at again once it is ten minutes old (as Orca does), so a model the account gained or lost shows
+          // without waiting for a conversation: in the background, the names it had kept where the ids are the same.
+          if (Date.now() - Math.max(await knownModelsAt(tool as EngineTool), lookedAgain.get(tool) ?? 0) > 600_000) {
+            lookedAgain.set(tool, Date.now());
+            void listModels(tool as EngineTool).then((fresh) => {
+              if (!fresh.length) return;
+              const had = new Map(known.map((m) => [m.id, m.label]));
+              rememberModels(tool as EngineTool, fresh.map(({ id, label }) => ({ id, label: had.get(id) ?? label })));
+            });
+          }
+          return { models: grouped(known) };
+        }
+        const listed = await listModels(tool as EngineTool);
+        if (listed.length) rememberModels(tool as EngineTool, listed.map(({ id, label }) => ({ id, label })));
+        return { models: listed };
+      }
+      const bin = await findBin("cursor");
+      if (!bin) return { models: [] };
+      for (const args of [["models"], ["--list-models"]]) {
+        const r = await runCli(bin, args, 15_000).catch(() => null);
+        const models = r && r.code === 0 ? parseModelList(r.out) : [];
+        if (models.length) return { models };
+      }
+      return { models: [] };
+    }
+    case "worktree.state":
+      return { state: await worktreeState(str(params.path, 600)) };
+    // The folders beside its own that a running agent of yours may work in: what they are, or one added or taken away, kept for its
+    // folder as a start's are (extra-dirs.ts) and used from its next turn (Runner.setDirs).
+    case "dirs": {
+      const r = ctx.runners.get(`${str(params.sid, 64)}|${str(params.lane, 40) || "main"}`);
+      if (!r) throw new Error("No agent of yours is running there.");
+      const now = r.opts.dirs ?? [];
+      const add = str(params.add, 600);
+      const remove = str(params.remove, 600);
+      if (!add && !remove) return { dirs: now, folder: r.opts.copyOf || r.opts.cwd };
+      const folder = r.opts.copyOf || r.opts.cwd;
+      if (add && path.resolve(at(add)) === path.resolve(folder)) throw new Error("That's the folder it works in already.");
+      const next = remove ? now.filter((d) => d !== at(remove)) : [...now, add];
+      const dirs = await startDirs(next, folder, at);
+      r.setDirs(dirs);
+      return { dirs, folder };
+    }
+    case "command.stop": {
+      const r = ctx.runners.get(`${str(params.sid, 64)}|${str(params.lane, 40) || "main"}`);
+      if (!r) throw new Error("No agent of yours is running there.");
+      const command = str(params.command, 4000);
+      if (!command) throw new Error("Say which command.");
+      return { stopped: await r.stopCommand(command) };
+    }
+    case "stop": {
+      const key = `${str(params.sid, 64)}|${str(params.lane, 40) || "main"}`;
+      const r = ctx.runners.get(key);
+      if (!r) throw new Error("No agent of yours is running there.");
+      r.stop();
+      return { ok: true };
+    }
+  }
+  throw new Error(`Unknown request “${method}”.`);
+}

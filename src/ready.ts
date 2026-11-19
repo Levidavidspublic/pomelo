@@ -1,0 +1,117 @@
+import { runOf, type SessionState } from "./session/projection.js";
+import { isTestRun } from "./receipt.js";
+import { ENGINE_NAMES, MAIN_LANE, type EngineTool } from "./types.js";
+
+/**
+ * Ready to ship (Arun, 2026-11-01, the impress map: "review lives in too many places"; after Conductor's Checks tab, Codex's
+ * review queue and Devin Review): every agent's finished work across your sessions in one list, each with what proves it (its
+ * tests, a second agent's review), how big it is, and where its pull request stands, so shipping is a look and a press rather
+ * than a hunt through rooms. Read from each session's folded state alone, never its whole log: a list asked for on every home
+ * screen can't read megabytes of every session.
+ *
+ * Finished means: its agent isn't working, and its folder holds changes that aren't in a merged pull request yet. In a session
+ * with a board (a Crew room), only a lane with a task done or being checked: a teammate's folder with changes and no finished
+ * task is work in progress, not work to ship (Arun, 2026-11-01, a list of twelve "Nova's changes": "i dont like this").
+ */
+export interface ReadyItem {
+  sid: string;
+  /** The session's title. */
+  where: string;
+  lane: string;
+  /** The agent or teammate who did it. */
+  who: string;
+  tool?: EngineTool;
+  /** Its board task, when the work was one. */
+  task?: string;
+  files: number;
+  additions: number;
+  deletions: number;
+  /** Its own tests, as last run: passed or not, and the command. */
+  checks?: { ok: boolean; command: string; /** The work changed after it ran: it says nothing about what is there now. */ stale?: true };
+  /** A second agent's read of it. */
+  review?: { ok: boolean; by: string; note: string };
+  pr?: { url: string; merged: boolean };
+  /** When its diff was last seen (the session's last event time stands in). */
+  seq: number;
+  /** Waiting on the person (a question or an approval): it isn't finished, it needs them. */
+  waiting: boolean;
+}
+
+export function readyIn(state: SessionState): ReadyItem[] {
+  if (state.pr?.merged) return [];
+  const out: ReadyItem[] = [];
+  for (const [lane, d] of Object.entries(state.diffs ?? {})) {
+    if (!d.files.length) continue;
+    const run = runOf(state, lane);
+    if (run.status === "running") continue;
+    const tool = state.engines[lane]?.tool;
+    // By the name the session shows it under: the main agent was "Main" here, a name it has nowhere else ("Main's changes" over
+    // Claude Code's work on the home screen, 2026-11-04 UX pass).
+    const name =
+      lane === MAIN_LANE
+        ? state.mainName?.trim() || state.options.agent?.name || (tool ? ENGINE_NAMES[tool] : "Friday Code")
+        : (state.lanes.find((l) => l.id === lane)?.name ?? (tool ? ENGINE_NAMES[tool] : lane));
+    // The newest board task of this lane that is done or being checked: what this work was.
+    const task = [...(state.board?.tasks ?? [])].reverse().find((t) => t.lane === lane && (t.status === "done" || t.status === "review"));
+    if (!task && state.board?.tasks.length) continue;
+    const checks = task?.checks && !task.checks.running && !task.checks.skipped && task.checks.ok !== undefined ? { ok: task.checks.ok, command: task.checks.command, ...(task.checks.stale ? { stale: true as const } : {}) } : undefined;
+    out.push({
+      sid: state.id,
+      where: state.title || "A session",
+      lane,
+      who: name,
+      ...(tool ? { tool } : {}),
+      ...(task ? { task: task.title } : {}),
+      files: d.files.length + (d.more?.length ?? 0),
+      additions: d.files.reduce((n, f) => n + (f.additions ?? 0), 0),
+      deletions: d.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
+      ...(checks ? { checks } : {}),
+      // A review only when a second agent gave one: Friday's pass without a review, or one with no verdict, proves nothing.
+      ...(task?.review && !task.review.auto && !task.review.unclear ? { review: { ok: task.review.ok, by: task.review.by, note: task.review.note.slice(0, 200) } } : {}),
+      ...(state.pr ? { pr: { url: state.pr.url, merged: !!state.pr.merged } } : {}),
+      seq: d.seq,
+      waiting: run.status === "waiting_for_human",
+    });
+  }
+  return out;
+}
+
+/**
+ * Most worth a look first: proven and unshipped (tests passed or reviewed, no pull request yet), then the rest unshipped, then
+ * those with a pull request open; newest first in each. The same teammate's same changes seen from two rooms (one folder, two
+ * rooms it works in) show once.
+ */
+export function rankReady(items: ReadyItem[], at: (i: ReadyItem) => number): ReadyItem[] {
+  const tier = (i: ReadyItem) => (i.pr ? 2 : (i.checks?.ok && !i.checks.stale) || i.review?.ok ? 0 : 1);
+  const seen = new Set<string>();
+  return [...items]
+    .sort((a, b) => tier(a) - tier(b) || at(b) - at(a))
+    .filter((i) => {
+      const key = `${i.who}|${i.task ?? ""}|${i.files}|${i.additions}|${i.deletions}`;
+      return !seen.has(key) && !!seen.add(key);
+    });
+}
+
+/** What kind of check a command is, in a word or two: tests, a typecheck, lint, a build, or a check. */
+export function checkKind(command: string): string {
+  if (isTestRun(command)) return "tests";
+  if (/\btsc\b|typecheck|type-check|\bmypy\b|\bpyright\b/i.test(command)) return "typecheck";
+  if (/\blint\b|eslint|ruff|clippy|golangci/i.test(command)) return "lint";
+  if (/\bbuild\b/i.test(command)) return "build";
+  return "check";
+}
+
+/** The line under an item: what proves it, in words. */
+export function proofLine(i: ReadyItem): string {
+  const parts: string[] = [];
+  // Said as what ran (Arun, 2026-11-13: "give more on what was reviewed/checked"): a typecheck isn't "tests passed".
+  if (i.checks) {
+    const what = checkKind(i.checks.command);
+    parts.push(i.checks.stale ? `${what} ${i.checks.ok ? "passed" : "failed"} before the latest changes` : `${what} ${i.checks.ok ? "passed" : "failing"}`);
+  }
+  if (i.review) parts.push(i.review.ok ? `reviewed by ${i.review.by}` : `${i.review.by} asked for changes`);
+  if (!parts.length) parts.push("not checked yet");
+  return parts.join(" · ");
+}
+
+export const toolName = (t?: EngineTool) => (t ? ENGINE_NAMES[t] : "");

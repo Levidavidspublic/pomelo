@@ -1,0 +1,1172 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowLeftIcon, ArrowRightIcon, BugIcon, UsersIcon, CheckIcon, ChevronDownIcon, XIcon, ClockIcon, CopyIcon, FolderOpenIcon, GitPullRequestIcon, InboxIcon, PlayIcon, PlusIcon, ScrollTextIcon, Trash2Icon, WebhookIcon, WrenchIcon, ZapIcon, type LucideIcon } from "lucide-react";
+import type { AgentSchedule, AgentView } from "../agents.js";
+import type { Automation, AutomationRun } from "../automations.js";
+import { ENGINE_NAMES, type EngineMode, type EngineTool } from "../types.js";
+import { api } from "./api.js";
+import { CrewWorkflowRow, useCrewWorkflows } from "./TeamWorkflows.js";
+import { AutoDoors, WhoMark as WeekWhoMark, type WeekItem, type WeekSched, type WeekWho } from "./AutoWeek.js";
+import { useTeamNow } from "./Teammates.js";
+import { LEAD, WORKFLOW_TEMPLATES } from "../team-workflow-model.js";
+import { WorkflowAsks } from "./WorkflowAsks.js";
+import { WorkspaceCard } from "./Workspace.js";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { holdLeave } from "./leave-guard.js";
+import { isLocal } from "./edition.js";
+import { EngineMark, FridayMark } from "./BrandMarks.js";
+import { useMachine } from "./local.js";
+import type { Identity, RecentSession } from "./storage.js";
+import { TaskMark, type TaskMarkState } from "./TaskMark.js";
+import { relTime, useConfirm, type Confirmation } from "./ui.js";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
+import { PageHeader } from "@/components/dass";
+import { PageTabs, Tip } from "@/components/dass/page-bits";
+
+/**
+ * Automations (Arun, 2026-10-23: "get rid of the agents tab page and replace it with automations, this will for the coding
+ * tools and stuff in sessions we need to make this very advanced but very easy to understand and use").
+ *
+ * Each one reads as a sentence: when something happens, who does it (a coding tool, a team led by one, or Friday with a
+ * saved agent), where, what it is told, and what then. Templates start the common ones in a press; every run is a session of
+ * its own, listed under the automation with the way into it. The server keeps and runs them (automations.ts).
+ */
+
+type View = Omit<Automation, "when"> & {
+  when: Automation["when"] | { kind: "webhook"; url?: string };
+  says: { when: string; who: string };
+  mine: boolean;
+  /** Paused because its owner left the workspace: this person, an admin, may hand it on or delete it. */
+  mayHand?: boolean;
+  runs: AutomationRun[];
+  today: number;
+};
+type Draft = {
+  name: string;
+  on: boolean;
+  when: { kind: "schedule"; schedule: AgentSchedule } | { kind: "webhook"; url?: string } | { kind: "session"; sessionId: string; sessionTitle: string; on: "finished" | "failed" } | { kind: "manual" };
+  who: { tool: EngineTool | "friday"; team: EngineTool[]; mode: EngineMode; model: string; agentId: string };
+  folder: string;
+  copy: boolean;
+  does: string;
+  then: { pr: boolean; notify: boolean };
+  limits: { perDay: number; offline: "wait" | "skip" };
+};
+
+const TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+})();
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAYS = [1, 2, 3, 4, 5];
+
+const blank = (): Draft => ({
+  name: "",
+  on: true,
+  when: { kind: "manual" },
+  who: { tool: "claude", team: [], mode: "full", model: "", agentId: "" },
+  folder: "",
+  copy: true,
+  does: "",
+  then: { pr: false, notify: true },
+  limits: { perDay: 10, offline: "wait" },
+});
+
+/** The common ones, a press away. Each is a draft to look over, not something that runs before it is saved. */
+/** `tone`: a state colour from style.css (--st-*), so each template is told apart at a glance. */
+// A scheduled template's line says what it does; its chip says when, once (audit REST-20, Arun 2026-11-04).
+const TEMPLATES: { id: string; title: string; blurb: string; icon: LucideIcon; tone: string; make: () => Partial<Draft> }[] = [
+  {
+    id: "ci",
+    icon: WrenchIcon,
+    tone: "--st-blocked",
+    title: "Fix failing CI",
+    blurb: "Your CI calls its webhook when a build fails; a coding tool finds why and opens a fix.",
+    make: () => ({ name: "Fix failing CI", when: { kind: "webhook" }, does: "A CI build failed. Find out why and fix it, then run the tests again.\n\nWhat the CI sent:\n{{event}}", then: { pr: true, notify: true } }),
+  },
+  {
+    id: "review",
+    icon: GitPullRequestIcon,
+    tone: "--st-review",
+    title: "Review every PR",
+    blurb: "Called for each new pull request: reads the change, runs the tests, says what must change.",
+    make: () => ({ name: "Review every PR", when: { kind: "webhook" }, does: "Review this pull request: read the change against what it says it does, run the tests, and give a short review with anything that must change before it merges.\n\n{{event}}", then: { pr: false, notify: true } }),
+  },
+  {
+    id: "sweep",
+    icon: BugIcon,
+    tone: "--st-queued",
+    title: "Morning bug sweep",
+    blurb: "Goes through the open bugs, fixes the safe ones, lists the rest.",
+    make: () => ({ name: "Morning bug sweep", when: { kind: "schedule", schedule: { every: "weekly", at: "09:00", days: WEEKDAYS, tz: TZ } }, does: "Look through the open bugs and yesterday's errors. Fix the ones you can fix safely and list the rest with where each one lives in the code.", then: { pr: true, notify: true } }),
+  },
+  {
+    id: "triage",
+    icon: InboxIcon,
+    tone: "--st-working",
+    title: "Triage new issues",
+    blurb: "Called when an issue is filed: finds where it lives in the code and how big the fix is.",
+    make: () => ({ name: "Triage new issues", when: { kind: "webhook" }, who: { tool: "claude", team: [], mode: "plan", model: "", agentId: "" }, does: "A new issue came in. Find where in the code it lives, say how big the fix is and who should look at it. Don't change anything.\n\n{{event}}", then: { pr: false, notify: true } }),
+  },
+  {
+    id: "changelog",
+    icon: ScrollTextIcon,
+    tone: "--st-done",
+    title: "Weekly changelog",
+    blurb: "Writes up what merged this week, in plain words, grouped by area.",
+    make: () => ({ name: "Weekly changelog", when: { kind: "schedule", schedule: { every: "weekly", at: "16:00", days: [5], tz: TZ } }, does: "Write a changelog of what merged this week, grouped by area, in plain words a customer would understand.", then: { pr: false, notify: true } }),
+  },
+];
+
+/**
+ * On your own computer: no starter that waits for GitHub to call it, since its webhook is this computer's own address, which
+ * GitHub can't reach. Two more that run on a clock instead, so the shelf is as full.
+ */
+const LOCAL_TEMPLATES: typeof TEMPLATES = [
+  {
+    id: "nightly-tests",
+    icon: CheckIcon,
+    tone: "--st-review",
+    title: "Nightly tests",
+    blurb: "Runs the tests, fixes what fails, and opens a pull request with the fix.",
+    make: () => ({ name: "Nightly tests", when: { kind: "schedule", schedule: { every: "daily", at: "02:00", days: [], tz: TZ } }, does: "Run the project's tests. If anything fails, find the cause, fix it, and run them again until they pass.", then: { pr: true, notify: true } }),
+  },
+  {
+    id: "dependencies",
+    icon: WrenchIcon,
+    tone: "--st-working",
+    title: "Monday dependencies",
+    blurb: "Updates what's safe to update, runs the tests, and says what it left alone.",
+    make: () => ({ name: "Monday dependencies", when: { kind: "schedule", schedule: { every: "weekly", at: "09:00", days: [1], tz: TZ } }, does: "Check the project's dependencies for updates. Update the ones that are safe (patch and minor), run the tests, and list the major updates you left alone with what each would take.", then: { pr: true, notify: true } }),
+  },
+];
+const templates = () => (isLocal() ? [...TEMPLATES.filter((t) => t.make().when?.kind !== "webhook"), ...LOCAL_TEMPLATES] : TEMPLATES);
+
+const runMark = (s: AutomationRun["status"]): TaskMarkState => (s === "running" || s === "starting" ? "working" : s === "done" || s === "quiet" ? "done" : s === "failed" ? "blocked" : "open");
+// A quiet run had nothing new to say, and nobody was told (automations.ts).
+const RUN_WORD: Record<AutomationRun["status"], string> = { starting: "Starting", running: "Running", done: "Done", failed: "Failed", waiting: "Waiting for your computer", skipped: "Skipped", quiet: "Nothing new" };
+const MODE_WORD: Record<EngineMode, string> = { full: "Full access", edits: "Edits, asks first for commands", plan: "Plan only, changes nothing" };
+
+function toDraft(a: View): Draft {
+  const { name, on, who, folder, copy, does, then, limits } = a;
+  const when: Draft["when"] = a.when.kind === "webhook" ? { kind: "webhook", ...("url" in a.when && a.when.url ? { url: a.when.url } : {}) } : (a.when as Draft["when"]);
+  return { name, on, when, who: { ...who }, folder, copy, does, then: { ...then }, limits: { ...limits } };
+}
+
+export function AutomationsPage({
+  identity,
+  agents,
+  recents,
+  onOpen,
+  onSavedAgents,
+  onWorkflow,
+}: {
+  identity: Identity;
+  agents: AgentView[];
+  recents: RecentSession[];
+  onOpen: (sid: string, invite: string) => void;
+  /** The saved agents' own page: what "Who" can pick from. */
+  onSavedAgents: () => void;
+  /**
+   * The crew's workflows in the same list (TeamWorkflows.tsx), each opened in its builder: its id, or null for a new one (the "Why
+   * Crew" plan, 2026-11-13: one list of automations, each saying who runs it, a crew mate or a coding tool).
+   */
+  onWorkflow?: (id: string | null) => void;
+}) {
+  const [list, setList] = useState<View[] | null>(null);
+  const [failed, setFailed] = useState("");
+  const [editing, setEditing] = useState<{ id: string | null; draft: Draft } | null>(null);
+  const [ask, confirmUI] = useConfirm();
+  const [busy, setBusy] = useState("");
+  const wf = useCrewWorkflows(identity, !!onWorkflow);
+  const teamNow = useTeamNow();
+  const machine = useMachine(identity).state;
+
+  const load = useCallback(async () => {
+    try {
+      const got = await api<{ automations: View[] }>(identity, "/api/automations");
+      setList(got.automations.sort((a, b) => b.created - a.created));
+      setFailed("");
+    } catch (e) {
+      setFailed((e as Error).message);
+    }
+  }, [identity]);
+  useEffect(() => {
+    void load();
+    // A run's state moves on its own (running, then done): read again now and then while the page is open and in sight.
+    const t = setInterval(() => document.visibilityState === "visible" && void load(), 10_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const runNow = async (a: View) => {
+    setBusy(a.id);
+    try {
+      const { run } = await api<{ run: AutomationRun }>(identity, `/api/automations/${a.id}/run`, { method: "POST", body: "{}" });
+      await load();
+      if (run.sid && run.invite) onOpen(run.sid, run.invite);
+    } catch (e) {
+      setFailed((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const setOn = async (a: View, on: boolean) => {
+    setList((l) => l?.map((x) => (x.id === a.id ? { ...x, on } : x)) ?? l);
+    await api(identity, `/api/automations/${a.id}`, { method: "PATCH", body: JSON.stringify({ on }) }).catch((e) => setFailed((e as Error).message));
+    void load();
+  };
+
+  // An automation whose owner left the workspace (offboard.ts), paused: an admin hands it to someone here, or deletes it. The
+  // hosted service's only: the open-source edition has no workspace to leave, so none is ever paused there.
+  const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
+  const anyToHand = !!list?.some((a) => a.mayHand);
+  useEffect(() => {
+    if (!anyToHand) return;
+    void api<{ members: { accountId: string; name: string }[] }>(identity, "/api/workspace/members").then((r) => setPeople(r.members.map((m) => ({ id: m.accountId, name: m.name }))), () => {});
+  }, [anyToHand, identity]);
+  const handOn = async (a: View, to: string) => {
+    setBusy(a.id);
+    try {
+      await api(identity, `/api/automations/${a.id}/hand`, { method: "POST", body: JSON.stringify({ to }) });
+      await load();
+    } catch (e) {
+      setFailed((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const removeOthers = (a: View) =>
+    ask({
+      title: `Delete ${a.name}?`,
+      body: `It was ${a.paused?.person.name ?? a.ownerName}'s. The sessions its runs started stay where they are.`,
+      action: "Delete automation",
+      onConfirm: async () => {
+        await api(identity, `/api/automations/${a.id}`, { method: "DELETE" });
+        await load();
+      },
+    });
+
+  // The sidebar's Automations, pressed while an automation is open, is the way back to the list.
+  useEffect(() => {
+    const again = (e: Event) => (e as CustomEvent).detail === "automations" && setEditing(null);
+    addEventListener("friday:same-page", again);
+    return () => removeEventListener("friday:same-page", again);
+  }, []);
+
+  if (editing)
+    return (
+      <>
+      {/* The confirm the editor's Delete asks, shown with the editor: it showed only on the list, so Delete seemed to do nothing
+          and its question came up later, back on the list (2026-10-27 audit). */}
+      {confirmUI}
+      <Editor
+        identity={identity}
+        agents={agents}
+        recents={recents}
+        id={editing.id}
+        initial={editing.draft}
+        runs={list?.find((a) => a.id === editing.id)?.runs ?? []}
+        mine={editing.id ? (list?.find((a) => a.id === editing.id)?.mine ?? true) : true}
+        onOpen={onOpen}
+        onSavedAgents={onSavedAgents}
+        ask={ask}
+        onClose={() => (setEditing(null), void load())}
+        onSaved={(v) => (setList((l) => [v, ...(l ?? []).filter((x) => x.id !== v.id)]), setEditing({ id: v.id, draft: toDraft(v) }))}
+        onDelete={(name) =>
+          ask({
+            title: `Delete ${name || "this automation"}?`,
+            body: "It stops running. The sessions its runs started stay where they are.",
+            action: "Delete automation",
+            onConfirm: async () => {
+              await api(identity, `/api/automations/${editing.id}`, { method: "DELETE" });
+              setEditing(null);
+              await load();
+            },
+          })
+        }
+      />
+      </>
+    );
+
+  const start = (draft: Partial<Draft>) => setEditing({ id: null, draft: { ...blank(), ...Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== undefined)) } });
+
+  // The week ahead (AutoWeek.tsx): every automation, crew workflow and crew mate's routine that runs on a schedule, by who runs it.
+  const crewSeeds = (teamNow?.teammates ?? []).map((m) => ({ seed: m.look ?? m.name, name: m.name }));
+  const lead = teamNow?.teammates.find((m) => m.lane === teamNow?.lead);
+  const seedOf = (id: string) => ((m) => (m ? (m.look ?? m.name) : null))(id === LEAD ? lead : teamNow?.teammates.find((m) => m.id === id));
+  const asSched = (s: { every: string; at: string; days: number[]; tz?: string; hours?: number }): WeekSched => ({ every: s.every as WeekSched["every"], at: s.at || "09:00", days: s.days ?? [], ...(s.hours ? { hours: s.hours } : {}), ...(s.tz ? { tz: s.tz } : {}) });
+  const weekItems: WeekItem[] = [
+    ...(list ?? []).flatMap((a): WeekItem[] =>
+      a.on && a.when.kind === "schedule" ? [{ key: `a:${a.id}`, name: a.name, kind: "Automation", who: a.who.tool === "friday" ? { kind: "mate", seed: "Friday", name: "Friday" } : { kind: "tool", tool: a.who.tool }, sched: asSched(a.when.schedule), open: () => setEditing({ id: a.id, draft: toDraft(a) }) }] : [],
+    ),
+    ...(onWorkflow ? (wf.list ?? []) : []).flatMap((w): WeekItem[] => {
+      if (!w.on || w.trigger.kind !== "schedule") return [];
+      const seeds = [...new Set(w.steps.map((s) => seedOf(s.mate)).filter((x): x is string => !!x))];
+      return [{ key: `w:${w.id}`, name: w.name, kind: "Crew workflow", who: { kind: "crew", seeds: seeds.length ? seeds : crewSeeds.slice(0, 2).map((m) => m.seed), name: "The crew" }, sched: asSched(w.trigger.schedule), open: () => onWorkflow!(w.id) }];
+    }),
+    ...(isLocal() ? (teamNow?.teammates ?? []) : []).flatMap((m) => (m.checkins ?? []).filter((c) => !c.off).map((c): WeekItem => ({ key: `r:${m.id}:${c.id}`, name: c.name || c.text.split("\n")[0]!.slice(0, 60), kind: `${m.name}'s routine`, who: { kind: "mate", seed: m.look ?? m.name, name: m.name }, sched: asSched(c) }))),
+  ];
+  const toolsHere = (machine.tools ?? []).filter((t) => !!t.path).map((t) => t.tool);
+  const exTool: WeekWho = { kind: "tool", tool: toolsHere[0] ?? "claude" };
+
+  return (
+    <div className="page conns-page automations-page px-6! max-[640px]:px-4!">
+      <div className="page-inner">
+        {confirmUI}
+        {onWorkflow && wf.dialogs}
+        <PageHeader
+          title="Automations"
+          actions={
+            <>
+              {/* Saved agents are the product's (Agent Studio): the open-source edition's automations run your coding tools. */}
+              {!isLocal() && (
+                <Tip label="Instructions you saved once, to pick under Who">
+                  <Button variant="outline" size="sm" className="h-8 border-[var(--border)] bg-[var(--bg)] px-3 text-[13px] shadow-none" onClick={onSavedAgents}>
+                    Saved agents
+                  </Button>
+                </Tip>
+              )}
+              {/* Either kind from the one button: what runs it is the first thing chosen. */}
+              {onWorkflow ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button size="sm" className="h-8 px-3 text-[13px]">
+                      <PlusIcon /> New automation
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="auto-new-menu">
+                    <DropdownMenuItem onSelect={() => start({})}>
+                      <ZapIcon />
+                      <span className="auto-new-text">
+                        <span>A coding tool</span>
+                        <span className="auto-new-sub">On a schedule, a webhook or another agent finishing. Each run is a session.</span>
+                      </span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => onWorkflow(null)}>
+                      <UsersIcon />
+                      <span className="auto-new-text">
+                        <span>Your crew</span>
+                        <span className="auto-new-sub">Crew mates in steps that hand on to each other. Each run is a board in a room.</span>
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : (
+                <Button size="sm" className="h-8 px-3 text-[13px]" onClick={() => start({})}>
+                  <PlusIcon /> New automation
+                </Button>
+              )}
+            </>
+          }
+        />
+        {(failed || (onWorkflow && wf.failed)) && (
+          <p role="alert" className="mb-4 rounded-lg border border-[var(--border)] px-3 py-2 text-[13px] text-[var(--red)]">
+            {failed || wf.failed}
+          </p>
+        )}
+        {/* A crew workflow's run waiting for your OK, answered here as on its builder. */}
+        {onWorkflow && <WorkflowAsks identity={identity} onAnswered={() => void wf.load()} />}
+
+        {list === null ? (
+          <div className="grid gap-2">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-16 rounded-xl" />
+            ))}
+          </div>
+        ) : isLocal() ? (
+          <>
+            <AutoDoors crew={crewSeeds} tools={toolsHere} crewCount={(wf.list?.length ?? 0) + weekItems.filter((i) => i.key.startsWith("r:")).length} toolCount={list.length} onTool={() => start({})} {...(onWorkflow ? { onCrew: () => onWorkflow(null) } : {})} />
+            {(list.length > 0 || !!wf.list?.length) && (
+              <section className="mb-8" aria-labelledby="auto-list">
+                <h2 id="auto-list" className="auto-label">
+                  On autopilot
+                </h2>
+                {/* Cards, not full-width rows (Arun, 2026-11-16: "design this into a card instead of being a full width row"). */}
+                <ul className="auto-cards" aria-label="Your automations">
+                  {list.map((a) => (
+                    <Row key={a.id} a={a} busy={busy === a.id} onEdit={() => setEditing({ id: a.id, draft: toDraft(a) })} onRun={() => void runNow(a)} onToggle={(on) => void setOn(a, on)} onOpen={onOpen} />
+                  ))}
+                  {onWorkflow && wf.list?.map((w) => <CrewWorkflowRow key={w.id} w={w} wf={wf} onEdit={() => onWorkflow(w.id)} />)}
+                </ul>
+              </section>
+            )}
+          </>
+        ) : list.length === 0 && !wf.list?.length ? (
+          <Intro onStart={() => start({})} />
+        ) : (
+          <ul className="grid gap-2" aria-label="Your automations">
+            {list.map((a) => (
+              <Row
+                key={a.id}
+                a={a}
+                busy={busy === a.id}
+                onEdit={() => setEditing({ id: a.id, draft: toDraft(a) })}
+                onRun={() => void runNow(a)}
+                onToggle={(on) => void setOn(a, on)}
+                onOpen={onOpen}
+                handTo={a.mayHand ? (to) => void handOn(a, to) : undefined}
+                onDelete={a.mayHand ? () => removeOthers(a) : undefined}
+                people={people}
+              />
+            ))}
+            {onWorkflow && wf.list?.map((w) => <CrewWorkflowRow key={w.id} w={w} wf={wf} onEdit={() => onWorkflow(w.id)} />)}
+          </ul>
+        )}
+
+        <section className={isLocal() ? "" : "mt-8"} aria-labelledby="auto-templates">
+          <h2 id="auto-templates" className="auto-label">
+            {list?.length ? "Add another from a template" : "Start with one of these"}
+          </h2>
+          {/* In the open-source edition, by who runs them: the crew's workflows beside the coding tools' own. */}
+          {isLocal() && onWorkflow ? (
+            <div className="aw-starters">
+              <div className="aw-starters-col">
+                <h3>For your crew</h3>
+                <div className="auto-tpls">
+                  {WORKFLOW_TEMPLATES.map((t) => (
+                    <button key={t.id} type="button" className="auto-tpl group" onClick={() => onWorkflow(`tpl:${t.id}`)}>
+                      <span className="auto-tile aw-tpl-faces">
+                        <WeekWhoMark who={{ kind: "crew", seeds: (crewSeeds.length ? crewSeeds : [{ seed: "Sage" }, { seed: "Nova" }]).slice(0, 2).map((m) => m.seed), name: "" }} size={15} />
+                      </span>
+                      <span className="auto-tpl-text">
+                        <span className="auto-tpl-title">{t.name}</span>
+                        <span className="auto-tpl-blurb">{t.blurb}</span>
+                      </span>
+                      <WhenChip when={t.trigger.kind === "schedule" ? { kind: "schedule", schedule: t.trigger.schedule } : { kind: "manual" }} />
+                      <span className="auto-use">
+                        Use <ArrowRightIcon className="size-3.5" />
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="aw-starters-col">
+                <h3>For a coding tool</h3>
+                <div className="auto-tpls">
+                  {templates().map((t) => {
+                    const made = t.make();
+                    return (
+                      <button key={t.id} type="button" className="auto-tpl group" onClick={() => start(made)}>
+                        <span className="auto-tile">
+                          <WeekWhoMark who={exTool} size={16} />
+                        </span>
+                        <span className="auto-tpl-text">
+                          <span className="auto-tpl-title">{t.title}</span>
+                          <span className="auto-tpl-blurb">{t.blurb}</span>
+                        </span>
+                        <WhenChip when={made.when ?? { kind: "manual" }} />
+                        <span className="auto-use">
+                          Use <ArrowRightIcon className="size-3.5" />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
+          <>
+          {/* Templates are rows, not a grid of cards (DIRECTION.md §9.9): what it does, when it runs in meta, and "Use" on hover. */}
+          <div className="auto-tpls">
+            {templates().map((t) => {
+              const made = t.make();
+              return (
+                <button key={t.id} type="button" className="auto-tpl group" style={{ "--tone": `var(${t.tone})` } as React.CSSProperties} onClick={() => start(made)}>
+                  <span className="auto-tile">
+                    <t.icon className="size-4" />
+                  </span>
+                  <span className="auto-tpl-text">
+                    <span className="auto-tpl-title">{t.title}</span>
+                    <span className="auto-tpl-blurb">{t.blurb}</span>
+                  </span>
+                  <WhenChip when={made.when ?? { kind: "manual" }} />
+                  <span className="auto-use">
+                    Use <ArrowRightIcon className="size-3.5" />
+                  </span>
+                </button>
+              );
+            })}
+            <button type="button" className="auto-tpl auto-blank" onClick={() => start({})}>
+              <span className="auto-tile">
+                <PlusIcon className="size-4" />
+              </span>
+              <span className="auto-tpl-text">
+                <span className="auto-tpl-title">Start from scratch</span>
+                <span className="auto-tpl-blurb">Your own trigger, tool and instructions.</span>
+              </span>
+            </button>
+          </div>
+          </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/** What starts it, as a small chip in its colour: a schedule amber, a webhook blue, a session violet, Run now grey. */
+function WhenChip({ when }: { when: Draft["when"] | View["when"] }) {
+  const s = when.kind === "schedule" ? when.schedule : null;
+  const [Icon, tone, word] =
+    when.kind === "schedule"
+      ? [ClockIcon, "--st-queued", s!.every === "hourly" ? "Every hour" : s!.every === "daily" ? `Daily ${s!.at}` : s!.days.join() === WEEKDAYS.join() ? `Weekdays ${s!.at}` : `${s!.days.map((d) => DAYS[d]).join(", ")} ${s!.at}`]
+      : when.kind === "webhook"
+        ? [WebhookIcon, "--st-working", "Webhook"]
+        : when.kind === "session"
+          ? [ZapIcon, "--st-review", when.on === "failed" ? "When an agent fails" : "When an agent finishes"]
+          : [PlayIcon, "--text-muted", "Run now"];
+  return (
+    <span className="auto-when" style={{ "--tone": `var(${tone})` } as React.CSSProperties}>
+      <Icon className="size-3" />
+      {word}
+    </span>
+  );
+}
+
+/** Before there are any: what an automation is, drawn as the sentence it reads as, and the way to make one. */
+function Intro({ onStart }: { onStart: () => void }) {
+  const steps: { label: string; text: string; icon: LucideIcon; tone: string }[] = [
+    { label: "When", text: "Every weekday at 9:00", icon: ClockIcon, tone: "--st-queued" },
+    { label: "Who", text: "Claude Code, with Codex", icon: ZapIcon, tone: "--st-working" },
+    { label: "Does", text: "Sweep the open bugs", icon: BugIcon, tone: "--st-review" },
+    { label: "Then", text: "Opens a pull request", icon: GitPullRequestIcon, tone: "--st-done" },
+  ];
+  return (
+    <div className="auto-intro">
+      <div className="flex min-w-0 flex-col justify-center gap-3">
+        <h2 className="text-[20px] leading-tight font-semibold tracking-[-0.01em]">Put your coding tools on autopilot</h2>
+        <p className="max-w-[420px] text-[14px] leading-relaxed text-[var(--text-muted)]">
+          Say when it runs, which coding tool does it and what it's told. Each run opens a session of its own, so you can see what it did and step in.
+        </p>
+      </div>
+      <ol className="auto-steps" aria-label="An example">
+        {steps.map((st) => (
+          <li key={st.label} style={{ "--tone": `var(${st.tone})` } as React.CSSProperties}>
+            <span className="auto-tile">
+              <st.icon className="size-3.5" />
+            </span>
+            <span className="w-12 shrink-0 text-[12px] font-medium text-[var(--text-muted)]">{st.label}</span>
+            <span className="truncate text-[13px]">{st.text}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function WhoMark({ tool, size = 15 }: { tool: EngineTool | "friday"; size?: number }) {
+  return tool === "friday" ? <FridayMark size={size} /> : <EngineMark tool={tool} size={size} />;
+}
+
+/** Why an automation's owner is no longer in the workspace, after their name. */
+const PAUSED_WHY: Record<NonNullable<Automation["paused"]>["why"], string> = { removed: "was removed from the workspace", left: "left the workspace", deleted: "deleted their account" };
+
+function Row({
+  a,
+  busy,
+  onEdit,
+  onRun,
+  onToggle,
+  onOpen,
+  handTo,
+  onDelete,
+  people = [],
+}: {
+  a: View;
+  busy: boolean;
+  onEdit: () => void;
+  onRun: () => void;
+  onToggle: (on: boolean) => void;
+  onOpen: (sid: string, invite: string) => void;
+  handTo?: (to: string) => void;
+  onDelete?: () => void;
+  people?: { id: string; name: string }[];
+}) {
+  const last = a.runs[0];
+  return (
+    // An automation that is off reads dimmed, its controls not: a paused one's Hand to and Delete are what an admin is there for.
+    // min-w-0: in the list's grid a long line used to widen the row past a phone's screen and push those controls off it.
+    <li className="auto-row min-w-0">
+      <span className={cn("auto-row-mark grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--hover)]", !a.on && "opacity-70")}>
+        <WhoMark tool={a.who.tool} />
+      </span>
+      <button type="button" className={cn("auto-row-text min-w-0 flex-1 text-left focus-visible:outline-none", !a.on && "opacity-70")} onClick={onEdit} aria-label={`Edit ${a.name}`}>
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[14px] font-medium">{a.name}</span>
+          <WhenChip when={a.when} />
+        </span>
+        <span className="mt-0.5 block truncate text-[13px] text-[var(--text-muted)]">
+          {/* What starts it is the chip above; this line is who does it, and where. */}
+          {a.says.who}
+          {a.who.tool !== "friday" ? ` · ${a.folder ? a.folder.split(/[\\/]/).filter(Boolean).at(-1) : "a new folder each run"}` : ""}
+          {a.mine ? "" : ` · ${a.ownerName}'s`}
+        </span>
+        {/* Why it is off, when its owner is no longer in the workspace (offboard.ts). */}
+        {a.paused && (
+          <span className="mt-0.5 block truncate text-[12px] text-[var(--text-muted)]" title={`Paused · ${a.paused.person.name} ${PAUSED_WHY[a.paused.why]}`}>
+            Paused · {a.paused.person.name} {PAUSED_WHY[a.paused.why]}
+          </span>
+        )}
+      </button>
+      {last && (
+        <button
+          type="button"
+          className="auto-row-last hidden shrink-0 items-center gap-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--ink)] sm:flex"
+          disabled={!last.sid || !last.invite}
+          onClick={() => last.sid && last.invite && onOpen(last.sid, last.invite)}
+          title={last.note || RUN_WORD[last.status]}
+        >
+          <TaskMark state={runMark(last.status)} />
+          {RUN_WORD[last.status]} · {relTime(last.at)}
+        </button>
+      )}
+      <span className="auto-row-acts">
+      {handTo && (
+        <Select value="" onValueChange={(to) => to && handTo(to)} disabled={busy}>
+          <SelectTrigger size="sm" className="h-8 w-auto shrink-0 gap-1 text-[13px]" aria-label={`Hand ${a.name} to someone`}>
+            <SelectValue placeholder="Hand to…" />
+          </SelectTrigger>
+          <SelectContent align="end">
+            {people.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {p.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      {onDelete && (
+        <Tip label="Delete it">
+          <Button variant="ghost" size="icon-sm" aria-label={`Delete ${a.name}`} disabled={busy} onClick={onDelete}>
+            <Trash2Icon />
+          </Button>
+        </Tip>
+      )}
+      {a.mine && (
+        <>
+          <Tip label="Run it now">
+            <Button variant="ghost" size="icon-sm" aria-label={`Run ${a.name} now`} disabled={busy} onClick={onRun}>
+              <PlayIcon />
+            </Button>
+          </Tip>
+          <Switch checked={a.on} onCheckedChange={onToggle} aria-label={a.on ? `Pause ${a.name}` : `Turn ${a.name} on`} />
+        </>
+      )}
+      </span>
+    </li>
+  );
+}
+
+
+/** One line of the sentence: what it is on the left, its controls on the right. */
+function Part({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <div className="grid gap-2 border-b border-[var(--border)] px-4 py-4 last:border-b-0 sm:grid-cols-[120px_1fr] sm:gap-4">
+      <div>
+        <div className="text-[13px] font-medium">{label}</div>
+        {hint && <div className="mt-0.5 text-[12px] leading-snug text-[var(--text-muted)]">{hint}</div>}
+      </div>
+      <div className="flex min-w-0 flex-col gap-2.5">{children}</div>
+    </div>
+  );
+}
+
+function Chip({ on, onClick, children, disabled }: { on: boolean; onClick: () => void; children: ReactNode; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-7 items-center gap-1.5 rounded-[8px] border px-2.5 text-[13px] transition-colors disabled:opacity-40",
+        on ? "border-[var(--ink-2)] bg-[var(--hover)] text-[var(--ink)]" : "border-[var(--border)] text-[var(--ink-2)] hover:bg-[var(--hover)]",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Where an automation works: the same chooser as the message box's folder button, your repos and folders, search and Browse
+ * (Arun, 2026-11-16: "add support for like the folder thing we have like repos, folders, etc"), in place of a path typed in a
+ * box. Nothing picked is a new project folder each run, as before.
+ */
+function WherePick({ identity, tool, folder, onFolder }: { identity: Identity; tool: EngineTool; folder: string; onFolder: (folder: string) => void }) {
+  const btn = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const name = folder.split(/[\\/]/).filter(Boolean).at(-1) ?? folder;
+  return (
+    <span className="auto-where">
+      <button ref={btn} type="button" className="auto-where-btn" aria-expanded={open} aria-label={folder ? `Works in ${name}, choose another folder` : "New folder each run, choose a folder"} title={folder || undefined} onClick={() => setOpen((o) => !o)}>
+        <FolderOpenIcon className="size-[15px] shrink-0 text-[var(--ink-3)]" />
+        <span className="auto-where-name">{folder ? name : "New folder"}</span>
+        <span className="auto-where-sub">{folder ? folder : "a new project folder each run"}</span>
+        <ChevronDownIcon className="size-3.5 shrink-0 text-[var(--ink-3)]" />
+      </button>
+      {folder && (
+        <Tip label="No folder: a new one each run">
+          <Button variant="ghost" size="icon-sm" aria-label="Remove this folder" onClick={() => onFolder("")}>
+            <XIcon />
+          </Button>
+        </Tip>
+      )}
+      {open && (
+        <WorkspaceCard
+          identity={identity}
+          tool={tool}
+          trigger={btn.current}
+          prefer="below"
+          only="repos"
+          onPick={(p) => {
+            if (p?.folder) onFolder(p.folder.path);
+            setOpen(false);
+          }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </span>
+  );
+}
+
+function Editor({
+  identity,
+  agents,
+  recents,
+  id,
+  initial,
+  runs,
+  mine,
+  onOpen,
+  onSavedAgents,
+  onClose,
+  onSaved,
+  onDelete,
+  ask,
+}: {
+  identity: Identity;
+  agents: AgentView[];
+  recents: RecentSession[];
+  id: string | null;
+  initial: Draft;
+  runs: AutomationRun[];
+  mine: boolean;
+  ask: (c: Confirmation) => void;
+  onOpen: (sid: string, invite: string) => void;
+  onSavedAgents: () => void;
+  onClose: () => void;
+  onSaved: (v: View) => void;
+  onDelete: (name: string) => void;
+}) {
+  const [d, setD] = useState<Draft>(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const machine = useMachine(identity).state;
+  useEffect(() => setD(initial), [initial]);
+  // Every run it has kept, not only the latest few the list has, and kept current while a run goes.
+  const [history, setHistory] = useState(runs);
+  useEffect(() => {
+    if (!id) return;
+    const read = () => void api<{ runs: AutomationRun[] }>(identity, `/api/automations/${id}/runs`).then((r) => setHistory(r.runs), () => {});
+    read();
+    const t = setInterval(() => document.visibilityState === "visible" && read(), 10_000);
+    return () => clearInterval(t);
+  }, [id, identity]);
+  const set = (change: Partial<Draft>) => setD((x) => ({ ...x, ...change }));
+  const who = (change: Partial<Draft["who"]>) => setD((x) => ({ ...x, who: { ...x.who, ...change } }));
+
+  // The coding tools on this computer first; the rest can still be picked, for a computer that has them.
+  const installed = useMemo(() => machine.tools.filter((t) => t.path).map((t) => t.tool), [machine.tools]);
+  const tools = useMemo(() => {
+    const all: EngineTool[] = (Object.keys(ENGINE_NAMES) as EngineTool[]).filter((t) => t !== "acp");
+    return [...installed.filter((t) => all.includes(t)), ...all.filter((t) => !installed.includes(t))];
+  }, [installed]);
+  const friday = d.who.tool === "friday";
+  const sched = d.when.kind === "schedule" ? d.when.schedule : null;
+  const setSched = (s: Partial<AgentSchedule>) => sched && set({ when: { kind: "schedule", schedule: { ...sched, ...s } } });
+
+  const save = async () => {
+    // Nothing to do is no automation: one saved with an empty "Does" ran its tool on nothing, its placeholder reading like
+    // instructions it didn't have (2026-10-27 audit). A saved agent brings its own instructions.
+    if (!d.does.trim() && !d.who.agentId) {
+      setError("Say what it does: the instructions it runs with each time.");
+      document.querySelector<HTMLElement>(".automations-page textarea")?.focus();
+      return;
+    }
+    // On these days with none ticked was saved as Monday to Friday without a word (2026-10-28 QA; Arun: "TEST EVERYTHING… EVERY
+    // INTERACTION, EVERY VISUAL"): it asks for the days instead.
+    if (sched?.every === "weekly" && !sched.days.length) {
+      setError("Pick the days it runs on, or choose Every day.");
+      document.querySelector<HTMLElement>('.automations-page [role="group"][aria-label="Days"] button')?.focus();
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const body = JSON.stringify({ ...d, name: d.name.trim() || "Untitled automation" });
+      const got = id
+        ? await api<{ automation: View }>(identity, `/api/automations/${id}`, { method: "PATCH", body })
+        : await api<{ automation: View }>(identity, "/api/automations", { method: "POST", body });
+      onSaved(got.automation);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const hookUrl = d.when.kind === "webhook" ? d.when.url : undefined;
+  // Saved and not changed since: Save has nothing to do, and says so by being off (2026-10-28 QA: it looked ready on an
+  // automation just opened).
+  const unchanged = !!id && JSON.stringify(d) === JSON.stringify(initial);
+  const NAME_MAX = 80;
+  // What leaving would lose, asked by the arrow and by every other way out, as a workflow's builder asks (leave-guard.ts): an
+  // automation's instructions went without a word (2026-11-02 review).
+  const unsaved = mine && JSON.stringify(d) !== JSON.stringify(initial);
+  const askLeave = (go: () => void) =>
+    ask(id ? { title: "Leave without saving?", body: "Your changes to this automation are lost.", action: "Leave", onConfirm: go } : { title: "Leave this new automation?", body: "It hasn't been created, so it's lost.", action: "Leave", onConfirm: go });
+  const askRef = useRef(askLeave);
+  askRef.current = askLeave;
+  useEffect(() => (unsaved ? holdLeave((go) => askRef.current(go)) : undefined), [unsaved]);
+
+  return (
+    <div className="page conns-page automations-page px-6! max-[640px]:px-4!">
+      <div className="page-inner"><div className="mx-auto w-full max-w-[820px]">
+        <div className="mb-4 flex items-center gap-2">
+          <Button variant="ghost" size="sm" className="h-8 px-2 text-[13px]" onClick={() => (unsaved ? askLeave(onClose) : onClose())}>
+            <ArrowLeftIcon /> Automations
+          </Button>
+          <div className="ml-auto flex items-center gap-2">
+            {id && mine && (
+              <Button variant="ghost" size="sm" className="h-8 px-2 text-[13px] text-[var(--text-muted)]" onClick={() => onDelete(d.name)}>
+                <Trash2Icon /> Delete
+              </Button>
+            )}
+            {mine && (
+              <Button size="sm" className="h-8 px-3 text-[13px]" disabled={saving || unchanged} title={unchanged ? "Nothing changed since it was saved" : undefined} onClick={() => void save()}>
+                {saving ? "Saving…" : id ? (unchanged ? "Saved" : "Save") : "Create automation"}
+              </Button>
+            )}
+          </div>
+        </div>
+        <h1 className="sr-only">{id ? d.name : "New automation"}</h1>
+        {/* How much of the 80 a name has left, once it nears them: a long name was cut at 80 without a word (2026-10-28 QA). */}
+        <div className="relative">
+        {mine && d.name.length >= NAME_MAX - 16 && (
+          <span className={`pointer-events-none absolute top-[11px] right-3 text-[12px] tabular-nums ${d.name.length >= NAME_MAX ? "text-[var(--amber)]" : "text-[var(--text-muted)]"}`} aria-live="polite">
+            {NAME_MAX - d.name.length} left
+          </span>
+        )}
+        <Input
+          value={d.name}
+          onChange={(e) => set({ name: e.target.value })}
+          placeholder="Name it, like “Fix failing CI”"
+          aria-label="Name"
+          maxLength={NAME_MAX}
+          disabled={!mine}
+          // A name box that shows it is one, alike in both themes: its outline at rest, not only under the pointer (Arun,
+          // 2026-10-28: "make sure the box outline is visible", of the workflow name; "a look for like the little details").
+          className={`mb-3 h-10 border-[var(--border-strong)] bg-transparent px-3 text-[18px] font-semibold shadow-none hover:border-[color-mix(in_srgb,var(--ink)_28%,transparent)] focus-visible:ring-0 md:text-[18px] dark:bg-transparent disabled:hover:border-[var(--border-strong)] ${mine && d.name.length >= NAME_MAX - 16 ? "pr-[72px]" : ""}`}
+        />
+        </div>
+        {error && (
+          <p role="alert" className="mb-3 text-[13px] text-[var(--red)]">
+            {error}
+          </p>
+        )}
+
+        <fieldset disabled={!mine} className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
+          <Part label="When" hint="What starts a run.">
+            <PageTabs<Draft["when"]["kind"]>
+              label="When"
+              value={d.when.kind}
+              onChange={(k) =>
+                set({
+                  when:
+                    k === "schedule"
+                      ? { kind: "schedule", schedule: { every: "weekly", at: "09:00", days: WEEKDAYS, tz: TZ } }
+                      : k === "webhook"
+                        ? { kind: "webhook" }
+                        : k === "session"
+                          ? (() => {
+                              // Not one of its own runs' sessions: its end would start the next run, and that one the next, to the
+                              // day's limit (2026-10-27 audit).
+                              const r = recents.find((x) => !history.some((h) => h.sid === x.sid));
+                              return { kind: "session" as const, sessionId: r?.sid ?? "", sessionTitle: r?.alias || r?.title || "", on: "finished" as const };
+                            })()
+                          : { kind: "manual" },
+                })
+              }
+              options={[
+                { value: "schedule", label: "On a schedule" },
+                { value: "webhook", label: "A webhook" },
+                { value: "session", label: "An agent finishes" },
+                { value: "manual", label: "Only Run now" },
+              ]}
+            />
+            {sched && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Select value={sched.every} onValueChange={(v) => setSched({ every: v as AgentSchedule["every"], ...(v === "weekly" && !sched.days.length ? { days: WEEKDAYS } : {}) })}>
+                  <SelectTrigger size="sm" aria-label="How often" className="h-8 w-[150px] text-[13px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="hourly">Every hour</SelectItem>
+                    <SelectItem value="daily">Every day</SelectItem>
+                    <SelectItem value="weekly">On these days</SelectItem>
+                  </SelectContent>
+                </Select>
+                {sched.every !== "hourly" && (
+                  <>
+                    <span className="text-[13px] text-[var(--text-muted)]">at</span>
+                    <Input type="time" value={sched.at} onChange={(e) => setSched({ at: e.target.value })} aria-label="At" className="h-8 w-[120px] text-[13px] md:text-[13px]" />
+                  </>
+                )}
+                <span className="text-[12px] text-[var(--text-muted)]">{sched.tz}</span>
+              </div>
+            )}
+            {sched?.every === "weekly" && (
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Days">
+                {DAYS.map((day, i) => (
+                  <Chip key={day} on={sched.days.includes(i)} onClick={() => setSched({ days: sched.days.includes(i) ? sched.days.filter((x) => x !== i) : [...sched.days, i].sort() })}>
+                    {day}
+                  </Chip>
+                ))}
+              </div>
+            )}
+            {d.when.kind === "webhook" &&
+              (hookUrl ? (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <code className="min-w-0 flex-1 truncate rounded-md bg-[var(--hover)] px-2 py-1.5 text-[12px]">{hookUrl}</code>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Copy the webhook address"
+                      onClick={() => void navigator.clipboard.writeText(hookUrl).then(() => (setCopied(true), setTimeout(() => setCopied(false), 1500)))}
+                    >
+                      {copied ? <CheckIcon /> : <CopyIcon />}
+                    </Button>
+                  </div>
+                  <span className="text-[12px] text-[var(--text-muted)]">POST anything to it, from CI, GitHub or a script: what is posted is what the run is told about. Keep it secret: it is the key.</span>
+                </div>
+              ) : (
+                <span className="text-[13px] text-[var(--text-muted)]">Its address shows here once it's created.</span>
+              ))}
+            {d.when.kind === "session" && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Select value={d.when.on} onValueChange={(v) => d.when.kind === "session" && set({ when: { ...d.when, on: v as "finished" | "failed" } })}>
+                  <SelectTrigger size="sm" aria-label="When the agent" className="h-8 w-[150px] text-[13px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="finished">When it finishes</SelectItem>
+                    <SelectItem value="failed">When it fails</SelectItem>
+                  </SelectContent>
+                </Select>
+                <span className="text-[13px] text-[var(--text-muted)]">in</span>
+                <Select
+                  value={d.when.sessionId}
+                  onValueChange={(sid) => {
+                    const r = recents.find((x) => x.sid === sid);
+                    if (d.when.kind === "session") set({ when: { ...d.when, sessionId: sid, sessionTitle: r?.alias || r?.title || d.when.sessionTitle } });
+                  }}
+                >
+                  <SelectTrigger size="sm" aria-label="Which session" className="h-8 min-w-[200px] max-w-[320px] text-[13px]">
+                    <SelectValue placeholder="Pick a session" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {d.when.sessionId && !recents.some((r) => r.sid === (d.when as { sessionId: string }).sessionId) && <SelectItem value={d.when.sessionId}>{d.when.sessionTitle || "That session"}</SelectItem>}
+                    {recents.slice(0, 30).map((r) => (
+                      <SelectItem key={r.sid} value={r.sid}>
+                        {r.alias || r.title || "Untitled session"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </Part>
+
+          <Part label="Who" hint="Which coding tool does it, and with whom.">
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={d.who.tool} onValueChange={(v) => who({ tool: v as Draft["who"]["tool"], team: d.who.team.filter((t) => t !== v) })}>
+                <SelectTrigger size="sm" aria-label="Coding tool" className="h-8 min-w-[170px] text-[13px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {tools.map((t) => (
+                    // The open-source edition runs on this computer only: a tool it doesn't have can't be picked (2026-10-28 QA).
+                    <SelectItem key={t} value={t} disabled={isLocal() && installed.length > 0 && !installed.includes(t) && t !== d.who.tool}>
+                      <EngineMark tool={t} size={14} /> {ENGINE_NAMES[t]}
+                      {installed.length > 0 && !installed.includes(t) ? " (not on this computer)" : ""}
+                    </SelectItem>
+                  ))}
+                  {!isLocal() && (
+                    <SelectItem value="friday">
+                      <FridayMark size={14} /> Friday, in the cloud
+                    </SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              {!friday && (
+                <Select value={d.who.mode} onValueChange={(v) => who({ mode: v as EngineMode })}>
+                  <SelectTrigger size="sm" aria-label="What it may do" className="h-8 min-w-[150px] text-[13px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["full", "edits", "plan"] as const).map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {MODE_WORD[m]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            {friday ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Select value={d.who.agentId || "none"} onValueChange={(v) => who({ agentId: v === "none" ? "" : v })}>
+                  <SelectTrigger size="sm" aria-label="Saved agent" className="h-8 min-w-[200px] text-[13px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No saved agent</SelectItem>
+                    {agents.map((a) => (
+                      <SelectItem key={a.id} value={a.id}>
+                        {a.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <button type="button" className="text-[13px] text-[var(--text-muted)] underline-offset-2 hover:underline" onClick={onSavedAgents}>
+                  Manage saved agents
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[12px] text-[var(--text-muted)]">Helpers, led by {ENGINE_NAMES[d.who.tool as EngineTool]}: it splits the work between them.</span>
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Helpers">
+                  {(installed.length ? installed : tools.slice(0, 4))
+                    .filter((t) => t !== d.who.tool)
+                    .map((t) => {
+                      const on = d.who.team.includes(t);
+                      return (
+                        <Chip key={t} on={on} disabled={!on && d.who.team.length >= 4} onClick={() => who({ team: on ? d.who.team.filter((x) => x !== t) : [...d.who.team, t] })}>
+                          <EngineMark tool={t} size={13} /> {ENGINE_NAMES[t]}
+                        </Chip>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+          </Part>
+
+          {!friday && (
+            <Part label="Where" hint="The folder on your computer it works in.">
+              <WherePick identity={identity} tool={d.who.tool as EngineTool} folder={d.folder} onFolder={(folder) => set({ folder })} />
+              {d.folder && (
+                <label className="flex items-center gap-2 text-[13px]">
+                  <Switch checked={d.copy} onCheckedChange={(copy) => set({ copy })} aria-label="Work on its own copy" />
+                  Work on its own copy of the folder, so your own work there is left alone
+                </label>
+              )}
+              {!d.folder && d.who.team.length > 0 && <span className="text-[12px] text-[var(--text-muted)]">Helpers need a folder to share: without one, the lead works alone.</span>}
+            </Part>
+          )}
+
+          <Part label="Does" hint={<>What it's told. <code className="text-[12px]">{"{{event}}"}</code> is what started the run.</>}>
+            <Textarea value={d.does} onChange={(e) => set({ does: e.target.value })} placeholder="Fix whatever made the build fail, and run the tests again." aria-label="What it does" rows={5} maxLength={8000} className="text-[13px] md:text-[13px]" />
+          </Part>
+
+          <Part label="Then" hint="When it's done.">
+            {!friday && (
+              <label className="flex items-center gap-2 text-[13px]">
+                <Switch checked={d.then.pr} onCheckedChange={(pr) => set({ then: { ...d.then, pr } })} aria-label="Open a pull request" />
+                Open a pull request with the change
+              </label>
+            )}
+            {/* Told through the product's own channels: the open-source edition has none, and its runs show here. */}
+            {!isLocal() && (
+              <label className="flex items-center gap-2 text-[13px]">
+                <Switch checked={d.then.notify} onCheckedChange={(notify) => set({ then: { ...d.then, notify } })} aria-label="Tell me" />
+                Tell me when a run ends, where my notifications go
+              </label>
+            )}
+          </Part>
+
+          <Part label="Limits" hint="So it can't run away.">
+            <div className="flex flex-wrap items-center gap-2 text-[13px]">
+              At most
+              <Input
+                type="number"
+                min={1}
+                max={200}
+                value={d.limits.perDay}
+                onChange={(e) => set({ limits: { ...d.limits, perDay: Math.max(1, Math.min(200, Number(e.target.value) || 1)) } })}
+                aria-label="Runs a day"
+                className="h-8 w-[72px] text-[13px] md:text-[13px]"
+              />
+              runs a day
+            </div>
+            {!friday && (
+              <div className="flex flex-wrap items-center gap-2 text-[13px]">
+                If my computer isn't on
+                <Select value={d.limits.offline} onValueChange={(v) => set({ limits: { ...d.limits, offline: v as "wait" | "skip" } })}>
+                  <SelectTrigger size="sm" aria-label="If my computer isn't on" className="h-8 min-w-[200px] text-[13px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="wait">wait for it, up to 12 hours</SelectItem>
+                    <SelectItem value="skip">skip that run</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </Part>
+        </fieldset>
+
+        {id && (
+          <section className="mt-6" aria-labelledby="auto-runs">
+            <h2 id="auto-runs" className="mb-2 text-[13px] font-medium text-[var(--ink-2)]">
+              Runs
+            </h2>
+            {history.length === 0 ? (
+              <p className="text-[13px] text-[var(--text-muted)]">No runs yet. {mine ? "Press Run now on the list to try it." : ""}</p>
+            ) : (
+              <ul className="grid gap-1">
+                {history.map((r) => (
+                  <li key={r.id}>
+                    <button
+                      type="button"
+                      disabled={!r.sid || !r.invite}
+                      onClick={() => r.sid && r.invite && onOpen(r.sid, r.invite)}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[13px] hover:bg-[var(--hover)] disabled:hover:bg-transparent"
+                    >
+                      <TaskMark state={runMark(r.status)} />
+                      <span className="font-medium">{RUN_WORD[r.status]}</span>
+                      <span className="min-w-0 flex-1 truncate text-[var(--text-muted)]">
+                        {r.trigger}
+                        {r.note ? ` · ${r.note}` : ""}
+                      </span>
+                      <span className="shrink-0 text-[var(--text-muted)]">{relTime(r.at)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+      </div></div>
+    </div>
+  );
+}
