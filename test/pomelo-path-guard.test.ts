@@ -71,6 +71,8 @@ test("checks template paths and expressions and reports each kind once per line"
     `const backup = \`${fridayFolder}\${suffix}\`;`,
     "const multiline = os",
     `  .${homedirCall};`,
+    `const fromOsWithJob = \`\${os.${homedirCall}}/\${job}\`;`,
+    `const fromBareWithJob = \`\${${homedirCall}}/\${job}\`;`,
   )]);
 
   assert.deepEqual(result.findings, [
@@ -78,6 +80,26 @@ test("checks template paths and expressions and reports each kind once per line"
     { path: server, line: 2, kind: "friday-home" },
     { path: server, line: 3, kind: "friday-home" },
     { path: server, line: 6, kind: "friday-home" },
+    { path: server, line: 8, kind: "friday-home" },
+    { path: server, line: 9, kind: "friday-home" },
+  ]);
+});
+
+test("distinguishes JSX text from comments and checks embedded expressions", () => {
+  const result = findHardCodedPaths([file(client, 1,
+    "const label = <p>src/*</p>;",
+    `const scratch = '${temp}';`,
+    "const panel = <>",
+    `  <p>src/* "${home}"</p>`,
+    `  {/* '${temp}' */}`,
+    `  <p data-home="${home}">{os.${homedirCall}}</p>`,
+    "</>;",
+  )]);
+
+  assert.deepEqual(result.findings, [
+    { path: client, line: 2, kind: "temp" },
+    { path: client, line: 6, kind: "home" },
+    { path: client, line: 6, kind: "friday-home" },
   ]);
 });
 
