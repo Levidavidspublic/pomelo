@@ -42,8 +42,13 @@ test("recognizes each supported diagram type", () => {
   }
 });
 
-test("refuses init and config directives even around the header", () => {
-  for (const directive of ["%%{init: {}}%%", "%%{ config: {} }%%"]) {
+test("accepts stateDiagram-v2 as a state diagram and reads its labels", () => {
+  const source = "stateDiagram-v2\n  Ready: כן";
+  assert.deepEqual(checkDiagramSource(source), { ok: true, type: "stateDiagram", source, dir: "rtl" });
+});
+
+test("refuses init, initialize, and config directives even around the header", () => {
+  for (const directive of ["%%{init: {}}%%", '%%{initialize: {"securityLevel":"loose"}}%%', "%%{ config: {} }%%"]) {
     expectRefusal(`${directive}\n${FLOWCHART}`, /directive/i);
     expectRefusal(`${FLOWCHART}\n${directive}`, /directive/i);
   }
@@ -60,6 +65,18 @@ test("refuses javascript and data URLs regardless of case", () => {
   for (const url of ["javascript:example", "JaVaScRiPt:example", "DATA:text/plain,example"]) {
     expectRefusal(`flowchart TD\n  A["[Link](${url})"]`, /URL/i);
   }
+  expectRefusal(`flowchart TD\n  A["<img src='DATA:example'>"]`, /URL/i);
+  expectRefusal('flowchart TD\n  A["data:text/plain;base64,ZXhhbXBsZQ=="]', /URL/i);
+});
+
+test("accepts ordinary data labels and task names", () => {
+  for (const source of [
+    "sequenceDiagram\n  Browser->>Data: fetch",
+    "flowchart TD\n  A[Input data: CSV]",
+    "gantt\n  dateFormat YYYY-MM-DD\n  Load data :a1, 2026-01-01, 1d",
+  ]) {
+    assert.equal(checkDiagramSource(source).ok, true, source);
+  }
 });
 
 test("refuses script and iframe tags and event attributes in labels", () => {
@@ -75,15 +92,19 @@ test("accepts source at the size limits and refuses source above them", () => {
   assert.equal(checkDiagramSource(atCharLimit).ok, true);
   expectRefusal(`${atCharLimit} `, /characters/i);
 
-  const atLineLimit = [FLOWCHART, ...Array<string>(498).fill("  %% note")].join("\r\n");
-  assert.equal(checkDiagramSource(atLineLimit).ok, true);
-  expectRefusal(`${atLineLimit}\r\n  %% one more line`, /lines/i);
+  for (const newline of ["\n", "\r\n", "\r"]) {
+    const atLineLimit = [FLOWCHART, ...Array<string>(498).fill("  %% note")].join(newline);
+    assert.equal(checkDiagramSource(atLineLimit).ok, true);
+    assert.equal(checkDiagramSource(atLineLimit + newline).ok, true);
+    expectRefusal(`${atLineLimit}${newline}  %% one more line`, /lines/i);
+    expectRefusal(atLineLimit + newline.repeat(2), /lines/i);
+  }
 });
 
 test("checks size before type and type before unsafe content", () => {
   const unknown = "unknown\n%%{init: {}}%%";
   expectRefusal(unknown.padEnd(20_001), /characters/i);
-  expectRefusal(`${unknown}${"\n".repeat(499)}`, /lines/i);
+  expectRefusal(`${unknown}${"\n".repeat(499)}overflow`, /lines/i);
   expectRefusal(unknown, /type/i);
 });
 
