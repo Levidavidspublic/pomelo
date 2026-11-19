@@ -4,41 +4,52 @@ import { readOutput } from "../src/browser-driver.js";
 import { MASK, maskAnswer, maskField, maskText, maskTree } from "../src/pomelo/mask.js";
 import { HIDDEN } from "../src/secrets.js";
 
-const canary = "FAKE-POMELO-MASK-CANARY";
+const canary = "FAKE POMELO+MASK@CANARY";
 const known = Object.freeze([canary]);
+const encodedCanary = encodeURIComponent(canary);
+const formQuery = new URLSearchParams({ lookup: canary }).toString();
+const pageUrl = "https://example.invalid/?lookup=";
 
 test("the planted canary disappears from page reads, field values, the accessibility tree and the answer", () => {
   const page = Object.freeze({
     title: "Example page",
-    url: `https://example.invalid/?lookup=${canary}`,
+    url: `${pageUrl}${encodedCanary}`,
     text: `Page text contains ${canary}`,
     cut: false,
     items: Object.freeze([`[1] Item label ${canary}`]),
     fields: Object.freeze([Object.freeze({ name: "lookup", type: "text", value: canary, filledByBroker: true })]),
     accessibility: Object.freeze({ children: Object.freeze([{ role: "group", children: [{ role: "text", name: canary }] }]) }),
+    pagesByUrl: Object.freeze({ [`${pageUrl}${encodedCanary}`]: { title: "Example page" }, [canary]: true }),
   });
   const answer = {
     output: readOutput({ ...page, items: [...page.items] }),
     content: [{ type: "text", text: `${page.text}\n${page.url}` }],
     isError: false,
+    pagesByUrl: page.pagesByUrl,
   };
 
   const snapshot = maskTree(page, known);
   const maskedAnswer = maskAnswer(answer, known);
   for (const result of [maskField(page.fields[0]), maskText(page.text, known), snapshot, maskedAnswer]) {
-    assert.ok(!JSON.stringify(result).includes(canary));
+    const json = JSON.stringify(result);
+    assert.ok(!json.includes(canary));
+    assert.ok(!json.includes(encodedCanary));
   }
   assert.deepEqual(snapshot, {
     ...page,
-    url: `https://example.invalid/?lookup=${MASK}`,
+    url: `${pageUrl}${MASK}`,
     text: `Page text contains ${MASK}`,
     items: [`[1] Item label ${MASK}`],
     fields: [{ ...page.fields[0], value: MASK }],
     accessibility: { children: [{ role: "group", children: [{ role: "text", name: MASK }] }] },
+    pagesByUrl: { [`${pageUrl}${MASK}`]: { title: "Example page" }, [MASK]: true },
   });
-  assert.equal(maskedAnswer.output, answer.output.replaceAll(canary, MASK));
-  assert.deepEqual(maskedAnswer.content, [{ type: "text", text: `${snapshot.text}\n${snapshot.url}` }]);
-  assert.equal(maskedAnswer.isError, false);
+  assert.deepEqual(maskedAnswer, {
+    output: answer.output.replaceAll(canary, MASK).replaceAll(encodedCanary, MASK),
+    content: [{ type: "text", text: `${snapshot.text}\n${snapshot.url}` }],
+    isError: false,
+    pagesByUrl: snapshot.pagesByUrl,
+  });
   assert.equal(page.fields[0].value, canary);
   assert.ok(JSON.stringify(answer).includes(canary));
   assert.deepEqual(maskTree(snapshot, known), snapshot);
@@ -62,13 +73,24 @@ test("Friday's secret-field rules and broker fills hide the value and preserve t
   assert.deepEqual(maskField({ name: "login", type: "password" }), { name: "login", type: "password", value: MASK });
 });
 
-test("registered values are literal, case-sensitive, and ignore empty and one-character entries", () => {
+test("registered values are literal, case-sensitive, and ignore empty, one-character and whitespace-only entries", () => {
   const literal = "fake.[a+b]$?";
-  const input = `a 🍊 ${literal} fake.ab ${literal.toUpperCase()} FakeCanary fakeCanary ${literal}`;
-  const registered = Object.freeze(["", "a", "🍊", "fake.", literal, "FakeCanary", literal]);
-  const expected = `a 🍊 ${MASK} ${MASK}ab ${literal.toUpperCase()} ${MASK} fakeCanary ${MASK}`;
+  const input = `a  🍊 \t\n${literal} fake.ab ${literal.toUpperCase()} FakeCanary fakeCanary ${literal}`;
+  const registered = Object.freeze(["", "a", "🍊", "  ", "\t\n", "fake.", literal, "FakeCanary", literal]);
+  const expected = `a  🍊 \t\n${MASK} ${MASK}ab ${literal.toUpperCase()} ${MASK} fakeCanary ${MASK}`;
   assert.equal(maskText(input, registered), expected);
   assert.equal(maskText(expected, registered), expected);
+});
+
+test("query encoding masks form values and lowercase hex escapes while preserving the case of the value", () => {
+  const lowerHex = encodedCanary.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
+  const wrongCase = encodeURIComponent(canary.toLowerCase());
+  const query = `${formQuery}&lowerHex=${lowerHex}&wrongCase=${wrongCase}`;
+  const masked = maskText(query, known);
+  assert.ok(!masked.includes(formQuery));
+  assert.ok(!masked.includes(lowerHex));
+  assert.equal(masked, `lookup=${MASK}&lowerHex=${MASK}&wrongCase=${wrongCase}`);
+  assert.equal(maskText(masked, known), masked);
 });
 
 test("Friday's text shield runs after registered values are masked", () => {

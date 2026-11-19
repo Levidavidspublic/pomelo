@@ -1,3 +1,4 @@
+import { toUSVString } from "node:util";
 import { secretField, type BrowserAnswer } from "../browser-driver.js";
 import { HIDDEN, hideSecrets } from "../secrets.js";
 
@@ -34,13 +35,28 @@ export function maskField<T extends Field>(field: T): T | (Omit<T, "value"> & { 
   return isSecretField(field) ? { ...field, value: MASK } : field;
 }
 
-function textMask(known: readonly string[]): (text: string) => string {
-  const values = [...new Set(known.filter((value) => /^.{2}/su.test(value)))];
-  if (values.length === 0) return (text) => hideSecrets(text).text;
+const escapePattern = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-  // Match existing placeholders first and prefer the longest value at each position.
-  values.sort((a, b) => b.length - a.length);
-  const pattern = [MASK, HIDDEN, ...values].map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+function textMask(known: readonly string[]): (text: string) => string {
+  const patterns: { length: number; pattern: string }[] = [];
+  for (const value of new Set(known)) {
+    if (!/^.{2}/su.test(value) || value.trim() === "") continue;
+    patterns.push({ length: value.length, pattern: escapePattern(value) });
+    const formValue = new URLSearchParams([["", value]]).toString().slice(1);
+    for (const encoded of new Set([encodeURIComponent(toUSVString(value)), formValue])) {
+      if (encoded === value) continue;
+      // Hex digits in percent escapes are case-insensitive. The rest of the value stays case-sensitive.
+      const pattern = escapePattern(encoded).replace(/%[0-9A-F]{2}/g, (escape) =>
+        escape.replace(/[A-F]/g, (digit) => `[${digit}${digit.toLowerCase()}]`),
+      );
+      patterns.push({ length: encoded.length, pattern });
+    }
+  }
+  if (patterns.length === 0) return (text) => hideSecrets(text).text;
+
+  // Match existing placeholders first and prefer longer values at each position.
+  patterns.sort((a, b) => b.length - a.length);
+  const pattern = [escapePattern(MASK), escapePattern(HIDDEN), ...patterns.map((entry) => entry.pattern)].join("|");
   const secrets = new RegExp(pattern, "g");
   return (text) => hideSecrets(text.replace(secrets, (match) => match === HIDDEN ? HIDDEN : MASK)).text;
 }
@@ -71,8 +87,10 @@ function walkTree<T>(node: T, redact: (text: string) => string): T {
     const { source, target } = pending.pop()!;
     const record = Array.isArray(source) ? source : maskField(source as Field);
     for (const [key, value] of Object.entries(record)) {
+      const isArrayIndex = Array.isArray(source) && /^(0|[1-9]\d*)$/.test(key) && Number(key) < source.length;
+      const maskedKey = isArrayIndex ? key : redact(key);
       // A page can supply an own "__proto__" key. Copy it as data.
-      Object.defineProperty(target, key, { value: copy(value), enumerable: true, writable: true, configurable: true });
+      Object.defineProperty(target, maskedKey, { value: copy(value), enumerable: true, writable: true, configurable: true });
     }
   }
   return result;
@@ -82,7 +100,7 @@ export function maskTree<T>(node: T, known: readonly string[]): T {
   return walkTree(node, textMask(known));
 }
 
-/** The browser can attach field boxes in screenshot coordinates. A flagged image still needs pixel masking. */
+/** The browser hook can attach field boxes in screenshot coordinates. Friday answers do not include them. */
 export function maskAnswer(answer: BrowserAnswerWithFields, known: readonly string[]): BrowserAnswerWithFields {
   const redact = textMask(known);
   const { output, fields, content, ...rest } = answer;
