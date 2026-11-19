@@ -10,3 +10,4 @@ This ledger records Pomelo's hooks into Friday so each change can be reviewed wh
 
 | File | Hook | Reason | Ticket |
 | --- | --- | --- | --- |
+| `src/agent-mesh.ts` | Added the nullable `pomelo` field and hooks in `listingFor` and `callOne` (7 lines). | Pomelo thread tools reach the mesh without forking Friday's dispatch switch. | #17 |
