@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Only change from CodeRabbit's settings: skip Cursor loop brief PRs (branch loop/*, title
+# "[LOOP BRIEF] ..."), which the VPS loop runner relays and closes. Title match is case-insensitive.
+# inheritance: true keeps the CodeRabbit UI / organisation settings for everything else
+# (without it, this file would replace them). Keys: docs.coderabbit.ai/configuration/auto-review
+inheritance: true
+reviews:
+  auto_review:
+    ignore_title_keywords:
+      - "[LOOP BRIEF]"
