@@ -136,7 +136,7 @@ test("an unknown tool falls through to Friday", async (t) => {
 });
 
 test("AgentMesh lists and routes Pomelo tools when configured and keeps Friday's existing behavior", async (t) => {
-  const { deps } = rig(t);
+  const { deps, projectTags } = rig(t);
   const store = { state: async () => project(sid, []), events: async () => [] };
   const mesh = new AgentMesh(store as never, null as never);
   const baseline = meshListing(false);
@@ -155,5 +155,13 @@ test("AgentMesh lists and routes Pomelo tools when configured and keeps Friday's
   assert.deepEqual(meshListing(false), baseline);
   assert.deepEqual(await mesh.call(sid, MAIN_LANE, "open_thread", args), { output: 'Opened thread "Docs" (child).' });
   assert.equal(deps.createThread.mock.calls[0]?.arguments[0].openedBy, MAIN_LANE);
+  assert.deepEqual(await mesh.call(sid, MAIN_LANE, "spawn_subagent", { purpose: "Docs", prompt: "Review" }), {
+    output: 'Spawned subagent "Reviewer".',
+  });
+  assert.equal(deps.addLane.mock.calls[0]?.arguments[1].spawnedBy, MAIN_LANE);
+  assert.deepEqual(await mesh.call(sid, MAIN_LANE, "tag_project", { tags: ["Docs"] }), {
+    output: "Tagged this thread: docs.",
+  });
+  assert.deepEqual(projectTags.get(sid), ["existing", "docs"]);
   assert.deepEqual(await mesh.call(sid, MAIN_LANE, "list_agents", {}), listAgents);
 });
