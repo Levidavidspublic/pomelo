@@ -1,0 +1,373 @@
+/**
+ * Friday's desktop app, the open-source edition: the same Friday as `npx github:splashxmoon/friday` (start.ts), in a window of
+ * its own instead of a browser tab. Built by scripts/build-local-desktop.mts and packaged by electron-builder; released from
+ * GitHub Actions (.github/workflows/release.yml).
+ */
+import { execFile } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, session, shell, systemPreferences } from "electron";
+import { powerSaveBlocker } from "electron";
+import { MAC_CSS, THEME_WATCH, WIN_CSS } from "../desktop-chrome.js";
+import { registerNative } from "../desktop-native.js";
+import { feedbackUrl, osName } from "../feedback.js";
+import { registerBrowser } from "./desktop-browser.js";
+import { registerTray } from "./desktop-tray.js";
+import { registerScreen } from "../desktop-screen.js";
+import { registerTerminal, stopTerminals } from "../desktop-terminal.js";
+import { registerUpdates } from "../desktop-update.js";
+import { killTools } from "../runner/spawn-cli.js";
+import { watchBorrowed } from "./borrowed.js";
+import { isOwnUrl } from "./own-url.js";
+import { startLocal, type Started } from "./start.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+// The page as built ahead (scripts/build-local-desktop.mts), so the app needs no bundler.
+process.env.CLIENT_DIR ||= path.join(here, "client");
+
+/**
+ * A Mac or Linux app opened from the Dock gets the system's bare PATH, not the one your shell builds, which is where Homebrew,
+ * nvm and ~/.local/bin put `claude`, `codex` and the rest. Read once from a login shell, five seconds at most, before anything
+ * looks for a coding tool; a slow or broken shell profile leaves the PATH as it was.
+ */
+const loginPath: Promise<void> =
+  process.platform === "win32"
+    ? Promise.resolve()
+    : new Promise((resolve) => {
+        const sh = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/bash");
+        const child = execFile(sh, ["-ilc", 'printf "__FRIDAY_PATH__%s__FRIDAY_PATH__" "$PATH"'], { timeout: 5000, env: { ...process.env, DISABLE_AUTO_UPDATE: "true" } }, (_err, out) => {
+          const found = /__FRIDAY_PATH__(.*?)__FRIDAY_PATH__/s.exec(String(out ?? ""))?.[1];
+          if (found) process.env.PATH = [...new Set([...found.split(":"), ...(process.env.PATH ?? "").split(":")].filter(Boolean))].join(":");
+          resolve();
+        });
+        child.stdin?.end();
+      });
+
+let friday: Started | null = null;
+let win: BrowserWindow | null = null;
+
+// ── Keeping the computer awake while the team works and the person is away ──────────────────────────────────────────────
+//
+// As the product app keeps it awake while an agent runs (desktop/main.ts syncAwake): here, while away mode is on and the team has
+// work in hand (a turn running or queued, a resume or wake due within two hours, a board being worked on), the Mac is kept from
+// sleeping when idle, and the app from App Nap (prevent-app-suspension). Closing the lid still sleeps it, which the away switch
+// says (Arun, 2026-10-28: "we need to ensure teams can work basically while you are away"). Asked every half minute.
+let blocker: number | null = null;
+async function syncAwake() {
+  const want = !!friday && !!(await friday.awake?.().catch(() => false));
+  if (want && blocker === null) blocker = powerSaveBlocker.start("prevent-app-suspension");
+  else if (!want && blocker !== null) {
+    powerSaveBlocker.stop(blocker);
+    blocker = null;
+  }
+}
+setInterval(() => void syncAwake(), 30_000).unref();
+
+/**
+ * The window's own buttons: on Windows and Linux the title bar is hidden and its minimise, maximise and close drawn over the page's
+ * top right, 40px tall to fit the page's header (macOS keeps its traffic lights, set into the header). On the top bar's colour (the
+ * sidebar's, style.css .session-view > .topbar), so they sit in the bar rather than in a block of their own (Arun, 2026-11-16:
+ * "audit the layout and stuff for windows and linux too"; they were the page's colour, #1c1c1c on #141414 and white on #f3f3f1).
+ */
+const OVERLAY = {
+  dark: { color: "#141414", symbolColor: "#ededed", height: 40 },
+  light: { color: "#f3f3f1", symbolColor: "#18181b", height: 40 },
+} as const;
+/** The window's own colour before the page paints: the page's (--bg). */
+const WINDOW_BG = { dark: "#1c1c1c", light: "#fafaf9" } as const;
+const themeFile = () => path.join(app.getPath("userData"), "theme");
+/** The theme the page last showed, so the window opens in it rather than flashing the other one. */
+function lastTheme(): "dark" | "light" {
+  try {
+    const t = readFileSync(themeFile(), "utf8").trim();
+    if (t === "dark" || t === "light") return t;
+  } catch {
+    // Not chosen yet: the system's.
+  }
+  return nativeTheme.shouldUseDarkColors ? "dark" : "light";
+}
+
+/**
+ * Frosted glass (Arun, 2026-11-16: "a frosted glass effect"): the window shows the desktop behind it through the system's own
+ * blur, the macOS vibrancy the menu bar panel has, Windows 11's acrylic. Kept, so the window opens in it. Elsewhere the page draws
+ * its own soft ground instead (html.glass without .glass-native).
+ */
+const glassFile = () => path.join(app.getPath("userData"), "glass");
+const lastGlass = (): boolean => {
+  try {
+    return readFileSync(glassFile(), "utf8").trim() === "1";
+  } catch {
+    return false;
+  }
+};
+const GLASS_NATIVE = process.platform === "darwin" || process.platform === "win32";
+function setGlass(w: BrowserWindow, on: boolean, theme: "dark" | "light") {
+  try {
+    if (process.platform === "darwin") w.setVibrancy(on ? "under-window" : null);
+    else if (process.platform === "win32") w.setBackgroundMaterial(on ? "acrylic" : "none");
+    w.setBackgroundColor(on && GLASS_NATIVE ? "#00000000" : WINDOW_BG[theme]);
+  } catch {
+    // An older system without the material: the page's own glass ground stands in.
+  }
+}
+
+function open(url: string) {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    // From the Dock, a second launch or the menu bar, Friday isn't the active app: focus() alone left its window behind the one
+    // in front on macOS. It is brought forward too.
+    if (process.platform === "darwin") app.focus({ steal: true });
+    return win.focus();
+  }
+  win = new BrowserWindow({
+    width: 1440,
+    height: 920,
+    minWidth: 1100,
+    minHeight: 700,
+    title: "Friday",
+    backgroundColor: lastGlass() && GLASS_NATIVE ? "#00000000" : WINDOW_BG[lastTheme()],
+    ...(lastGlass() && process.platform === "darwin" ? { vibrancy: "under-window" as const, visualEffectState: "followWindow" as const } : {}),
+    ...(lastGlass() && process.platform === "win32" ? { backgroundMaterial: "acrylic" as const } : {}),
+    show: false,
+    autoHideMenuBar: true,
+    // No title bar: the page draws its own header there, as in the product app. On macOS the traffic lights sit in it, 14px down
+    // (centre 20px down, Arun 2026-11-16: "move everything up slightly"), and the header's row lines up with them (style.css); elsewhere the window's buttons are drawn over its right end.
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 16, y: 14 } }
+      : { titleBarStyle: "hidden" as const, titleBarOverlay: OVERLAY[lastTheme()] }),
+    // webviewTag: the Preview panel draws the app being built in a <webview>, locked down below.
+    webPreferences: {
+      contextIsolation: true,
+      sandbox: true,
+      webviewTag: true,
+      preload: path.join(here, "preload.cjs"),
+    },
+  });
+  // A preview's <webview> is somebody's dev server's page: its own cookie jar, nothing of Node's, and no permissions (location,
+  // camera, external apps), whatever the page that made it asked for (lockPreview, set when the app starts). As in the product
+  // app (desktop/main.ts).
+  win.webContents.on("will-attach-webview", (_e, prefs) => {
+    prefs.partition = "persist:preview";
+    prefs.nodeIntegration = false;
+    prefs.nodeIntegrationInSubFrames = false;
+    prefs.sandbox = true;
+    prefs.contextIsolation = true;
+    delete prefs.preload;
+  });
+  win.once("ready-to-show", () => win?.show());
+  // Whether the window is in full screen, where macOS hides its buttons (preload.ts onFullScreen): the page guessed it from its
+  // size, and a window that filled the screen or had just left full screen kept the guess, its back and forward buttons under
+  // the traffic lights (Arun, 2026-10-29).
+  const sayFull = () => win?.webContents.send("friday:full-screen", win.isFullScreen());
+  win.on("enter-full-screen", sayFull);
+  win.on("leave-full-screen", sayFull);
+  // The product app's window chrome (desktop-chrome.ts): the header band that drags, with the window's buttons in it, and the
+  // page laid out below it; and the page's light or dark choice reported back for the window's buttons.
+  win.webContents.on("did-finish-load", () => {
+    void win?.webContents.insertCSS(process.platform === "darwin" ? MAC_CSS : WIN_CSS);
+    void win?.webContents.executeJavaScript(THEME_WATCH).catch(() => {});
+  });
+  // The window is Friday's, whatever a page calls itself.
+  win.on("page-title-updated", (e) => e.preventDefault());
+  // Friday's own pages stay in the window; anything else (GitHub, a docs link, Friday Team) opens in the browser.
+  // Whichever Friday the window is on now: the one it opened on may have been replaced (begin, below).
+  const own = (u: string) => !!friday && isOwnUrl(u, friday.url);
+  win.webContents.setWindowOpenHandler(({ url: u }) => {
+    if (!own(u) && /^https?:/.test(u)) void shell.openExternal(u);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (e, u) => {
+    if (own(u)) return;
+    e.preventDefault();
+    if (/^https?:/.test(u)) void shell.openExternal(u);
+  });
+  // A page drawn from text in a frame with no origin of its own (a Work session's page an agent made, a live visual in the chat)
+  // never leaves for another address: will-navigate above hears the window's own page only, and a frame's script could carry
+  // what it read to anywhere in its address (Arun, 2026-10-28: "iron everything and ensure we are good… any logic errors").
+  win.webContents.on("will-frame-navigate", (e) => {
+    if (e.isMainFrame || /^about:/i.test(e.url)) return;
+    const f = e.frame;
+    if (f && (f.url === "about:srcdoc" || f.origin === "null")) e.preventDefault();
+  });
+  win.on("closed", () => (win = null));
+  void win.loadURL(url);
+}
+
+/**
+ * The Preview's cookie jar (persist:preview) granted nothing: no permission, device, or screen or window to capture. Set when the
+ * app starts, before any page uses it: set only as the first webview was drawn, a page of that jar loaded before then (in a
+ * window of its own) had Electron's default, which grants everything (Arun, 2026-10-28: "iron everything and
+ * ensure we are good… any logic errors").
+ */
+function lockPreview(): void {
+  const preview = session.fromPartition("persist:preview");
+  preview.setPermissionRequestHandler((_w, _p, cb) => cb(false));
+  preview.setPermissionCheckHandler(() => false);
+  preview.setDevicePermissionHandler(() => false);
+  // No streams is a refusal.
+  preview.setDisplayMediaRequestHandler((_r, cb) => {
+    try {
+      cb({});
+    } catch {
+      // The frame that asked has gone: nothing to refuse.
+    }
+  });
+}
+
+/**
+ * The microphone, for voice input (client/voice.ts): Friday's own page may have it, sound only, never a camera; macOS asks the person
+ * the first time (NSMicrophoneUsageDescription, scripts/oss-export.mts). A preview never may: it has its own jar, locked above
+ * (lockPreview). Every other permission goes to Friday's own page alone.
+ */
+function allowMicrophone(): void {
+  const s = session.defaultSession;
+  const ours = (u: string) => !!friday && isOwnUrl(u, friday.url);
+  s.setPermissionRequestHandler((_w, permission, cb, details) => {
+    // Anything else, for Friday's own page only: a page the window was sent to elsewhere gets nothing it asks for.
+    if (permission !== "media") return cb(ours(details.requestingUrl));
+    const kinds = (details as { mediaTypes?: string[] }).mediaTypes ?? [];
+    if (!ours(details.requestingUrl) || !kinds.length || kinds.some((k) => k !== "audio")) return cb(false);
+    if (process.platform !== "darwin") return cb(true);
+    const now = systemPreferences.getMediaAccessStatus("microphone");
+    if (now === "granted") return cb(true);
+    if (now !== "not-determined") return cb(false);
+    void systemPreferences.askForMediaAccess("microphone").then(cb, () => cb(false));
+  });
+  s.setPermissionCheckHandler((_w, permission, origin, details) => permission !== "media" || (ours(origin) && (details as { mediaType?: string }).mediaType !== "video"));
+}
+
+/** A request from Friday's own page in one of its windows, never a previewed site or a page it was sent to. */
+const fromApp = (e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean =>
+  !!friday && !!BrowserWindow.fromWebContents(e.sender) && isOwnUrl(e.senderFrame?.url ?? e.sender.getURL(), friday.url);
+
+/** Waits for a process to be gone, `ms` at most. */
+async function exited(pid: number | undefined, ms: number): Promise<void> {
+  const alive = () => {
+    try {
+      return !!pid && process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+  };
+  for (const end = Date.now() + ms; alive() && Date.now() < end; ) await new Promise((r) => setTimeout(r, 200));
+}
+
+/**
+ * Friday started for this app, or the one already running on this folder (the terminal edition's) borrowed. A borrowed one is
+ * watched: when it stops, this app starts its own and the window goes to it, instead of staying on an address nothing answers.
+ */
+async function begin(): Promise<boolean> {
+  // Friday not starting (its folder can't be written, a disk full) left an app with no window and nothing to say why.
+  try {
+    // Using this computer (any input in the last two minutes): what an agent needs shows here, and the phone isn't buzzed too.
+    friday = await startLocal({ atComputer: () => powerMonitor.getSystemIdleTime() < 120 });
+  } catch (e) {
+    dialog.showErrorBox("Friday couldn't start", e instanceof Error ? e.message : String(e));
+    app.exit(1);
+    return false;
+  }
+  if (!friday.already) return true;
+  const pid = friday.pid;
+  // Started once its process is gone (ten seconds at most): it stops answering before it has written what it keeps, and
+  // starting on the folder before then would read it without the last of it.
+  watchBorrowed(friday.url, () =>
+    void exited(pid, 10_000)
+      .then(begin)
+      .then((ok) => {
+        if (!ok || !friday) return;
+        if (win && !win.isDestroyed()) void win.loadURL(friday.url);
+        else open(friday.url);
+      }),
+  );
+  return true;
+}
+
+if (!app.requestSingleInstanceLock()) app.quit();
+else {
+  // Whether the window is in full screen, asked once by the page as it starts (preload.ts onFullScreen); open() says when it changes.
+  ipcMain.handle("friday:is-full-screen", (e) => e.sender === win?.webContents && !!win?.isFullScreen());
+  // Choosing where a coding agent works, in the system's own folder picker: all the page gets back is the path chosen.
+  ipcMain.handle("friday:pick-folder", async (e) => {
+    if (!win || !fromApp(e)) return null;
+    const r = await dialog.showOpenDialog(win, { title: "Choose the folder your coding agent works in", properties: ["openDirectory", "createDirectory"] });
+    return r.canceled ? null : (r.filePaths[0] ?? null);
+  });
+  // Real shells for the terminal panel (desktop-terminal.ts), as in the product app.
+  registerTerminal(fromApp);
+  // "Open in" your editor, file manager or terminal, and the dock's count of what waits on you (desktop-native.ts).
+  registerNative(fromApp);
+  registerScreen(); // computer use's screen, bar and permissions, for the runner in this process (desktop-screen.ts)
+  registerBrowser(() => win, fromApp, () => friday?.url ?? null); // the agents' browser tool, on the session's Browser panel (desktop-browser.ts)
+  // Friday in the menu bar (desktop-tray.ts): its mark, how many work, and a panel to answer and start work without the window.
+  const tray = registerTray({
+    origin: () => friday?.url ?? null,
+    preload: path.join(here, "preload.cjs"),
+    showMain: () => {
+      if (!friday) return null;
+      open(friday.url);
+      return win && !win.isDestroyed() ? win : null;
+    },
+    trusted: fromApp,
+  });
+  // The page's light or dark choice (preload.ts setTheme): the window buttons and background follow it where the OS draws them.
+  ipcMain.on("friday:theme", (e, theme: unknown, choice: unknown) => {
+    if (!win || e.sender !== win.webContents) return;
+    const which = theme === "light" ? "light" : "dark";
+    // The app's own sheets (the folder picker, dialogs, menus) in the page's look: they followed the computer, light over a dark
+    // page. System stays the computer's, so the page goes on hearing when that changes (Arun, 2026-10-28: "TEST EVERYTHING…
+    // EVERY INTERACTION, EVERY VISUAL").
+    nativeTheme.themeSource = choice === "system" ? "system" : which;
+    try {
+      writeFileSync(themeFile(), which);
+      if (!lastGlass()) win.setBackgroundColor(WINDOW_BG[which]);
+      if (process.platform !== "darwin") win.setTitleBarOverlay(OVERLAY[which]);
+    } catch {
+      // Not every platform draws an overlay; the window is fine without one.
+    }
+  });
+  ipcMain.on("friday:glass", (e, on: unknown) => {
+    if (!win || e.sender !== win.webContents) return;
+    try {
+      writeFileSync(glassFile(), on === true ? "1" : "0");
+    } catch {
+      // Not kept: it still shows now.
+    }
+    setGlass(win, on === true, lastTheme());
+  });
+  app.on("second-instance", () => friday && open(friday.url));
+  app.whenReady().then(async () => {
+    // Help › Send feedback: a GitHub issue started with this version and system (feedback.ts), in the person's own browser.
+    const help = { role: "help" as const, submenu: [{ label: "Send Feedback…", click: () => void shell.openExternal(feedbackUrl({ version: app.getVersion(), os: osName(process.platform), app: true })) }] };
+    if (process.platform === "darwin") Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }, help]));
+    lockPreview();
+    allowMicrophone();
+    await loginPath;
+    if (!(await begin()) || !friday) return;
+    open(friday.url);
+    tray.start();
+    app.on("activate", () => friday && open(friday.url));
+    // Updates as the product app has them (desktop-update.ts): checked in the background, downloaded, and offered once ready.
+    registerUpdates();
+  });
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+  // Quitting closes the window first (so it doesn't reload against a server that's going), then Friday, which writes what
+  // it keeps, five seconds at most, then exits outright: a second app.quit() from here can be ignored as a quit already
+  // under way, and that left the app running with nothing in it.
+  let quitting = false;
+  app.on("before-quit", (e) => {
+    if (quitting || !friday) return;
+    quitting = true;
+    e.preventDefault();
+    stopTerminals();
+    for (const w of BrowserWindow.getAllWindows()) w.destroy();
+    // A coding tool still running when the five seconds are up is killed: it would outlive the app (spawn-cli.ts).
+    void Promise.race([friday.close(), new Promise((r) => setTimeout(r, 5000))]).finally(() => {
+      killTools();
+      app.exit(0);
+    });
+  });
+}

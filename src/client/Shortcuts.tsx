@@ -1,0 +1,642 @@
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { treeFiles } from "./treeFiles.js";
+import type { ToolCommand } from "../types.js";
+import { Icon, type IconName } from "./icons.js";
+import { isLocal } from "./edition.js";
+
+/**
+ * `/` for a command and `@` for a file, in the session composer.
+ *
+ * The two things people type most in a coding session are the same few asks
+ * ("run the tests and fix what fails") and the paths of files. Both are typing
+ * that the product can do for them, and both are discovered the way every
+ * editor already taught people: type the character, see the list.
+ *
+ * A command is just words. Picking one writes a well-formed instruction into
+ * the box, where it can be read and edited before it is sent — nothing
+ * happens that the room can't see in the message itself.
+ */
+
+export interface SlashCommand {
+  name: string;
+  hint: string;
+  icon: IconName;
+  /** What goes in the box. A trailing space leaves the caret ready for the rest of the sentence. */
+  text: string;
+}
+
+/** Whether this is a Mac, for writing shortcuts the way this keyboard labels them. */
+export const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+const ON_PC: Record<string, string> = { "⌘": "Ctrl", "⇧": "Shift", "⌥": "Alt", "⌃": "Ctrl" };
+/** One key as this keyboard names it: ⌘ on a Mac, Ctrl everywhere else. */
+export const keyLabel = (k: string): string => (IS_MAC ? k : (ON_PC[k] ?? k));
+/** A whole shortcut, as written in a hint: "⌘⇧P" stays on a Mac and is "Ctrl+Shift+P" everywhere else. */
+export const shortcut = (s: string): string => (IS_MAC ? s : [...s].map((c) => (ON_PC[c] ? `${ON_PC[c]}+` : c)).join("").replace(/\+$/, ""));
+
+/** Every key the app answers to, for the ? list and the Shortcuts tab in Settings. */
+/** Every key that does something, grouped by where it works, so a row no longer has to say "Code Review:" or "in a session". */
+export const SHORTCUTS: { title: string; keys: [string[], string][] }[] = [
+  {
+    title: "Anywhere",
+    keys: [
+      [["⌘", "K"], "Sessions, pages, settings and what the open session can do"],
+      [["⌘", "⇧", "P"], "The same, as editors bind it"],
+      [["⌘", "⇧", "F"], "Search sessions and everything said in them"],
+      [["⌘", "B"], "Show or hide the sidebar"],
+      [["⌘", "⌥", "1", "–", "9"], "Go to a session in the sidebar, counting from the top"],
+      [["⌃", "Tab"], "Back to the session you were in before (⇧ goes the other way)"],
+      [["⌘", "⇧", "U"], "Next session that's waiting on you"],
+      [["⌘", "⇧", "Y"], "Everything waiting on you, with Friday's suggested answers"],
+      [["⌘", "⇧", "Space"], "Quick prompt from anywhere on your computer, with a snapshot of the screen (desktop app)"],
+      [["Esc"], "Close menus and dialogs"],
+      [["?"], "Show this list"],
+    ],
+  },
+  {
+    title: "In a session",
+    keys: [
+      [["⌘", "P"], "Open a file"],
+      [["⌘", "Click"], "On a file in an answer: open it in your own editor, at its line (desktop app)"],
+      [["⌘", "S"], "Save the file you are editing"],
+      [["⌘", "."], "Show or hide the document"],
+      [["⌘", "1"], "Tasks"],
+      [["⌘", "2"], "Changes"],
+      [["⌘", "3"], "Terminal"],
+      [["⌘", "4"], "Preview"],
+      // ⌃ on a Mac and Alt elsewhere (SessionView agentKeys); they were answered to and listed nowhere (2026-11-02 review).
+      [[IS_MAC ? "⌃" : "⌥", "1", "–", "9"], "Bring up one agent (0 for all of them)"],
+      [["⌘", "J"], "The next thing an agent is waiting on you for"],
+      [["⌘", "'"], "Quote the words selected in the chat in your message"],
+    ],
+  },
+  {
+    title: "Message box",
+    keys: [
+      [["/"], "Jump to the message box"],
+      [["/", "…"], "A ready-made ask"],
+      [["@", "…"], "Mention a person (tells them)"],
+      [["#", "…"], "Point to a file"],
+      [["↑"], "In an empty box, bring back what you asked before"],
+      [["⌫"], "In an empty box, take the last quote off"],
+      [["↵"], "Send"],
+      [["⇧", "↵"], "New line"],
+    ],
+  },
+  {
+    title: "Code Review",
+    keys: [
+      [["J", "/", "K"], "Next or previous pull request"],
+      [["O"], "Open or close the selected one"],
+      [["R"], "Have your agents review it"],
+      [["A"], "Approve it, when it's waiting on you"],
+      [["M"], "Merge it, when it's ready"],
+      [["G"], "Open it on GitHub"],
+      [["1", "–", "4"], "Switch tabs"],
+    ],
+  },
+];
+
+/**
+ * Voice input's key (VoiceMic.tsx), in the open-source edition: ⌥ Space on a Mac, Ctrl+Shift+Space where Alt+Space opens the
+ * window menu. Added as the list is drawn, not as this file loads: a chunk can load before the edition is said (local-edition.ts).
+ */
+const TALK: [string[], string] = [IS_MAC ? ["⌥", "Space"] : ["⌃", "⇧", "Space"], "Talk instead of typing (hold, or tap: Settings › Voice)"];
+const shortcutGroups = () => (isLocal() ? SHORTCUTS.map((g) => (g.title === "Message box" ? { ...g, keys: [...g.keys.slice(0, 4), TALK, ...g.keys.slice(4)] } : g)) : SHORTCUTS);
+
+/** The list, as the "?" sheet and Settings › Shortcuts both show it: one source, so the two can't drift apart. */
+export function ShortcutList() {
+  return (
+    <div className="kbd-groups">
+      {shortcutGroups().map((g) => (
+        <section key={g.title} className="kbd-group" aria-labelledby={`kbd-${g.title.replace(/\W+/g, "-")}`}>
+          <h3 className="kbd-group-title" id={`kbd-${g.title.replace(/\W+/g, "-")}`}>
+            {g.title}
+          </h3>
+          <ul className="kbd-list">
+            {g.keys.map(([keys, what]) => (
+              <li key={what}>
+                <span>{what}</span>
+                <span className="keys">
+                  {keys.map((k, i) =>
+                    k === "/" && i > 0 && i < keys.length - 1 ? (
+                      <span key={i} className="kbd-sep">/</span>
+                    ) : k === "–" ? (
+                      <span key={i} className="kbd-sep">–</span>
+                    ) : (
+                      <kbd key={i}>{keyLabel(k)}</kbd>
+                    ),
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+export const COMMANDS: SlashCommand[] = [
+  { name: "test", icon: "check", hint: "Run the tests, fix what fails", text: "Run the project's tests. If anything fails, find the cause, fix it, and run them again until they pass. Say what you changed and why." },
+  { name: "fix", icon: "search", hint: "Find the cause and fix it", text: "Find the root cause of this and fix it, then check the fix works: " },
+  { name: "review", icon: "eye", hint: "Review the changes so far", text: "Review the changes made in this session for bugs, security problems and anything that doesn't fit how this codebase does things. List each finding with file:line and how serious it is. Don't change anything yet." },
+  { name: "plan", icon: "list", hint: "Plan before changing anything", text: "Before changing anything, read the relevant code and write a short plan: which files change, how, and what could break. Wait for a go-ahead. The task: " },
+  { name: "explain", icon: "help", hint: "How does this work?", text: "Explain how this works, citing the files and lines that matter: " },
+  { name: "tests", icon: "flask", hint: "Write tests for something", text: "Write tests for this, following the test setup the project already uses, and run them: " },
+  { name: "lint", icon: "shield", hint: "Typecheck and lint, fix errors", text: "Run the project's typechecker and linter and fix every error they report. Don't silence rules to make them pass." },
+  { name: "commit-msg", icon: "pencil", hint: "Summarise the changes for a commit", text: "Summarise everything changed in this session as a commit message: an imperative subject under 65 characters, a blank line, then what changed and why." },
+];
+
+/**
+ * One command per connected MCP.
+ *
+ * A connection is only useful if the agent thinks to reach for it, and the
+ * agent thinks to reach for it if the instruction names it. Typing `/gmail`
+ * writes that sentence, so the connection is discoverable from the box rather
+ * than from the settings page it was added on.
+ *
+ * Only the ones that are on and answering: offering a connection that is
+ * disabled or erroring writes an instruction the agent cannot carry out.
+ */
+export function mcpCommands(connections: { name: string; enabled: boolean; status: { state: string; tools: { name: string }[] } }[]): SlashCommand[] {
+  return connections
+    .filter((c) => c.enabled && c.status.state === "connected")
+    .map((c) => {
+      const tools = c.status.tools.length;
+      return {
+        name: c.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+        icon: "plug" as IconName,
+        hint: tools ? `${c.name} · ${tools} tool${tools === 1 ? "" : "s"}` : c.name,
+        text: `Use the ${c.name} connection to `,
+      };
+    })
+    .filter((c) => c.name);
+}
+
+/** A command the team or you saved, as the composer lists it: it says whose it is, so a shared one is not mistaken for a built-in. */
+export function savedCommands(list: { name: string; hint: string; text: string; scope: "personal" | "workspace" }[]): SlashCommand[] {
+  return list.map((c) => ({ name: c.name, icon: "zap" as IconName, hint: `${c.scope === "workspace" ? "Team" : "Yours"} · ${c.hint}`, text: c.text }));
+}
+
+
+export interface SavedCommandRow {
+  id: string;
+  name: string;
+  hint: string;
+  text: string;
+  scope: "personal" | "workspace";
+  ownerId: string;
+  ownerName: string;
+  /** Its owner shared it and then left the workspace. */
+  ownerLeft?: true;
+}
+
+/** The commands this person can run, read once and again whenever the manager changes them. */
+export function useSavedCommands(): { commands: SavedCommandRow[]; reload: () => void } {
+  const [commands, setCommands] = useState<SavedCommandRow[]>([]);
+  const load = () =>
+    fetch("/api/commands")
+      .then((r) => (r.ok ? (r.json() as Promise<{ commands: SavedCommandRow[] }>) : { commands: [] }))
+      .then((d) => setCommands(d.commands))
+      .catch(() => {});
+  useEffect(() => {
+    void load();
+    const on = () => void load();
+    window.addEventListener("friday:commands", on);
+    return () => window.removeEventListener("friday:commands", on);
+  }, []);
+  return { commands, reload: () => void load() };
+}
+
+type Open = { kind: "command" | "file" | "person"; query: string; start: number };
+
+/** What the caret is in the middle of typing, if it is a command or a mention. */
+export function tokenAt(text: string, caret: number): Open | null {
+  const before = text.slice(0, caret);
+  // Colons and dots too: Claude Code's plugin commands ("/ponytail:audit") and Codex's prompts ("/prompts:fix").
+  const cmd = before.match(/^\/([\w:.-]*)$/);
+  if (cmd) return { kind: "command", query: cmd[1]!.toLowerCase(), start: 0 };
+  // "@" is for people and "#" for files, so naming a teammate never opens the folder (Arun, 2026-10-21).
+  const at = before.match(/(^|\s)@([\w.'-]*)$/);
+  if (at) return { kind: "person", query: at[2]!.toLowerCase(), start: caret - at[2]!.length - 1 };
+  const hash = before.match(/(^|\s)#([\w./\\-]*)$/);
+  if (hash) return { kind: "file", query: hash[2]!.toLowerCase(), start: caret - hash[2]!.length - 1 };
+  return null;
+}
+
+/**
+ * Files that match what was typed, best first.
+ *
+ * The file name matching beats the folder matching, and a shorter path beats a
+ * longer one: typing `app` should offer `src/app.ts` before
+ * `src/components/apparel/list.tsx`.
+ */
+export function rankFiles(files: string[], query: string, limit = 8): string[] {
+  const q = query.toLowerCase();
+  if (!q) return files.slice(0, limit);
+  const scored: [number, string][] = [];
+  for (const f of files) {
+    const lower = f.toLowerCase();
+    const base = lower.slice(lower.lastIndexOf("/") + 1);
+    let score = -1;
+    if (base.startsWith(q)) score = 0;
+    else if (base.includes(q)) score = 1;
+    else if (lower.includes(q)) score = 2;
+    else if (subsequence(lower, q)) score = 3;
+    if (score >= 0) scored.push([score * 1000 + f.length, f]);
+  }
+  return scored.sort((a, b) => a[0] - b[0]).slice(0, limit).map(([, f]) => f);
+}
+
+function subsequence(text: string, q: string): boolean {
+  let i = 0;
+  for (const ch of text) if (ch === q[i] && ++i === q.length) return true;
+  return false;
+}
+
+/** Set a textarea's value the way typing would, so React's onChange sees it. */
+function setValue(el: HTMLTextAreaElement, value: string, caret: number) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.focus();
+  el.setSelectionRange(caret, caret);
+}
+
+/** The last command list each lane's tool gave, for this tab; and per tool across visits, so a new page has one to show at once. */
+const cmdsHere = new Map<string, ToolCommand[]>();
+const CMDS_KEY = (tool: string) => `friday.cmds.${tool}`;
+function knownCmds(sid: string, lane: string, tool: string): { lane: string; list: ToolCommand[] } | null {
+  const here = cmdsHere.get(`${sid}|${lane}`);
+  if (here) return { lane, list: here };
+  try {
+    const saved = JSON.parse(localStorage.getItem(CMDS_KEY(tool)) ?? "null") as ToolCommand[] | null;
+    return Array.isArray(saved) && saved.every((c) => typeof c?.name === "string" && typeof c?.insert === "string") ? { lane, list: saved } : null;
+  } catch {
+    return null;
+  }
+}
+function keepCmds(sid: string, lane: string, tool: string, list: ToolCommand[]): void {
+  cmdsHere.set(`${sid}|${lane}`, list);
+  try {
+    localStorage.setItem(CMDS_KEY(tool), JSON.stringify(list.slice(0, 200)));
+  } catch {
+    // Not kept for next time: this tab still has it.
+  }
+}
+
+export function useShortcuts({
+  textarea,
+  sid,
+  invite,
+  commands,
+  files: filesEnabled,
+  connections = [],
+  saved = [],
+  onManage,
+  lane = "main",
+  tool,
+  people = [],
+  agents = [],
+  onAgent,
+  crew = [],
+  only,
+  loadFiles,
+  filesFrom = "",
+  noFolder = "No folder to search right now: no computer of yours is connected to this chat.",
+  below = false,
+}: {
+  /**
+   * The new-session box, before there is a session: its folder's files read from the computer, not from the session's
+   * (audit CODE-9, Arun 2026-11-04: "@", "/" and "#" did nothing there). Without a session, "/" offers the tool's commands as it
+   * last listed them.
+   */
+  loadFiles?: () => Promise<{ output?: string; error?: string }>;
+  /** Which folder `loadFiles` reads: another one is read afresh. */
+  filesFrom?: string;
+  /** What "#" says when there is no folder to read, in place of the session's "no computer of yours is connected". */
+  noFolder?: string;
+  /** The list opens under the box, where there is room: the new-session box sits near the top of its page. */
+  below?: boolean;
+  /** "/" offers these and nothing else: a team chat's own commands (team-commands.ts), not a coding tool's. */
+  only?: SlashCommand[];
+  /** Agents "@" can name: offered before people, and picking one points the box at it. */
+  agents?: { id: string; name: string; mark: ReactNode; hint: string; /** How it stands, for its hint's colour. */ tone?: string }[];
+  onAgent?: (id: string) => void;
+  /** Your crew mates and crew rooms: naming one first in a coding session's box hands its work on (crew-carry.tsx). */
+  crew?: { id: string; name: string; hint: string; kind: "mate" | "room"; /** Its face: a crew mate's mascot. */ mark?: ReactNode }[];
+  /** The other people in the session: "@" offers them before files, and naming one tells them (mentions.ts). */
+  people?: { id: string; name: string; online?: boolean }[];
+  /** The lane the box writes to. */
+  lane?: string;
+  /** The coding tool that lane runs (Claude Code, Codex, Cursor): its own commands are offered, not Friday's. */
+  tool?: string;
+  saved?: SlashCommand[];
+  /** Open the place where commands are made and deleted. */
+  onManage?: () => void;
+  textarea: RefObject<HTMLTextAreaElement | null>;
+  sid: string;
+  invite: string;
+  commands: boolean;
+  files: boolean;
+  /** Connected MCPs, each of which becomes a command of its own. */
+  connections?: { name: string; enabled: boolean; status: { state: string; tools: { name: string }[] } }[];
+}) {
+  const [open, setOpen] = useState<Open | null>(null);
+  const [active, setActive] = useState(0);
+  const [files, setFiles] = useState<string[] | null>(null);
+  /** Why the folder couldn't be listed, in the server's words ("This session has no folder yet"), said instead of "no files". */
+  const [filesWhy, setFilesWhy] = useState("");
+  const fetched = useRef(0);
+  /**
+   * The tool's own commands. Asked of its machine (the server, then the runner, then back) only once "/" was typed, they took
+   * a second or more to arrive and the list said "Asking …" every time. Now asked as soon as the lane is open and kept: the
+   * last list shows at once, from this tab or from the last visit, and a fresh one replaces it quietly.
+   */
+  const [toolCmds, setToolCmds] = useState<{ lane: string; list: ToolCommand[] } | null>(() => (tool ? knownCmds(sid, lane, tool) : null));
+  const askedCmds = useRef({ at: 0, lane: "" });
+  useEffect(() => {
+    if (!tool) return;
+    const known = knownCmds(sid, lane, tool);
+    if (known && toolCmds?.lane !== lane) setToolCmds(known);
+    // No session to ask yet: the list it gave last time, or none ("lists its commands when it starts").
+    if (!sid) return void (!known && setToolCmds({ lane, list: [] }));
+    // Asked again sooner while it has none: Claude Code gives its list a few seconds after it starts.
+    if (askedCmds.current.lane === lane && Date.now() - askedCmds.current.at < (toolCmds?.list.length ? 60_000 : 5_000)) return;
+    askedCmds.current = { at: Date.now(), lane };
+    fetch(`/api/sessions/${encodeURIComponent(sid)}/repo?op=commands&lane=${encodeURIComponent(lane)}&invite=${encodeURIComponent(invite)}`)
+      .then((r) => r.json() as Promise<{ output?: string }>)
+      .then((d) => {
+        const list = (JSON.parse(d.output ?? "{}") as { commands?: ToolCommand[] }).commands;
+        const fresh = { lane, list: Array.isArray(list) ? list : [] };
+        // An empty answer (the tool not started yet) doesn't wipe a list it gave before.
+        if (fresh.list.length || !known) setToolCmds(fresh);
+        if (fresh.list.length) keepCmds(sid, lane, tool, fresh.list);
+      })
+      .catch(() => setToolCmds((c) => c ?? { lane, list: [] }));
+  }, [open?.kind, tool, lane, sid, invite]); // eslint-disable-line react-hooks/exhaustive-deps
+  const own = toolCmds?.lane === lane ? toolCmds.list : null;
+
+  // Another folder picked in the new-session box: its own files, read afresh.
+  useEffect(() => {
+    fetched.current = 0;
+    setFiles(null);
+    setFilesWhy("");
+  }, [filesFrom]);
+  // The folder can change under a run, so the list is fetched again when it is
+  // more than half a minute old — not on every keystroke.
+  useEffect(() => {
+    if (open?.kind !== "file" || !filesEnabled || Date.now() - fetched.current < 30_000) return;
+    fetched.current = Date.now();
+    (loadFiles ? loadFiles() : fetch(`/api/sessions/${encodeURIComponent(sid)}/repo?op=tree&invite=${encodeURIComponent(invite)}`).then((r) => r.json() as Promise<{ output?: string; error?: string }>))
+      .then((d) => {
+        // A reason was read as an empty folder (2026-10-28 QA: "The folder has no files to name yet." for a session with none).
+        const got = treeFiles(d);
+        setFilesWhy(got.why);
+        setFiles(got.files);
+      })
+      .catch(() => (setFilesWhy("The folder couldn't be read just now."), setFiles([])));
+  }, [open?.kind, filesEnabled, sid, invite, filesFrom]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const write = (insert: string) => {
+    const el = textarea.current;
+    if (!el) return;
+    setValue(el, insert + el.value.slice(el.selectionStart), insert.length);
+    setOpen(null);
+  };
+  const named = (name: string, q: string) => !q || name.toLowerCase().split(/\s+/).some((w) => w.startsWith(q)) || name.toLowerCase().startsWith(q);
+  const items: { key: string; label: string; hint?: string; tone?: string; icon: IconName; mark?: ReactNode; pick: () => void }[] =
+    open?.kind === "command" && commands && only
+      ? only.filter((c) => c.name.startsWith(open.query)).map((c) => ({ key: `team:${c.name}`, label: `/${c.name}`, hint: c.hint, icon: c.icon, pick: () => write(c.text) }))
+      :
+    open?.kind === "command" && commands && tool
+      ? // A coding tool's lane: the team's own commands, then the tool's (Claude Code runs its own; Codex's and Cursor's prompt
+        // files and skills are expanded as their terminals would). Friday's built-in asks are for Friday's agents.
+        [
+          ...saved.filter((c) => c.name.startsWith(open.query)).map((c) => ({ key: `saved:${c.name}`, label: `/${c.name}`, hint: c.hint, icon: c.icon, pick: () => write(c.text) })),
+          ...(own ?? [])
+            .filter((c) => c.name.toLowerCase().startsWith(open.query))
+            // In the order a person scans for one: Claude Code lists its built-in ones after every skill and plugin.
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .slice(0, 80)
+            .map((c) => ({ key: `tool:${c.name}`, label: c.insert.trim(), hint: c.hint ? `${c.hint} · ${c.description}` : c.description, icon: (c.insert.startsWith("$") ? "skills" : "terminal") as IconName, pick: () => write(c.insert) })),
+        ]
+      : open?.kind === "command" && commands
+      ? // The built-in asks first, then a command for each connection: the
+        // eight are the same every time and worth learning; the connections
+        // are this workspace's own.
+        [...saved, ...COMMANDS, ...mcpCommands(connections)].filter((c) => c.name.startsWith(open.query)).map((c) => ({
+          key: c.name,
+          label: `/${c.name}`,
+          hint: c.hint,
+          icon: c.icon,
+          pick: () => {
+            const el = textarea.current;
+            if (!el) return;
+            setValue(el, c.text + el.value.slice(el.selectionStart), c.text.length);
+            setOpen(null);
+          },
+        }))
+      : open?.kind === "person" && (people.length || agents.length || crew.length)
+        ? [
+          ...agents
+            .filter((a) => named(a.name, open.query.toLowerCase()))
+            .slice(0, 13)
+            .map((a) => ({
+              key: `agent:${a.id}`,
+              label: a.name,
+              hint: a.hint,
+              ...(a.tone ? { tone: a.tone } : {}),
+              icon: "agent" as IconName,
+              mark: a.mark,
+              pick: () => {
+                const el = textarea.current;
+                if (!el) return;
+                const head = `${el.value.slice(0, open.start)}@${a.name} `;
+                setValue(el, head + el.value.slice(el.selectionStart), head.length);
+                setOpen(null);
+                onAgent?.(a.id);
+              },
+            })),
+          // Your crew and its rooms, after the agents here: picked, its name goes first in the box, and sending hands the work on.
+          ...crew
+            .filter((c) => named(c.name, open.query.toLowerCase()))
+            .slice(0, 8)
+            .map((c) => ({
+              key: `crew:${c.kind}:${c.id}`,
+              label: c.name,
+              hint: c.hint,
+              icon: (c.kind === "room" ? "users" : "agent") as IconName,
+              ...(c.mark ? { mark: c.mark } : {}),
+              pick: () => {
+                const el = textarea.current;
+                if (!el) return;
+                const head = `@${c.name} `;
+                // At the start, as a hand-off reads it; anything typed before moves after it.
+                const rest = `${el.value.slice(0, open.start)}${el.value.slice(el.selectionStart)}`.trim();
+                setValue(el, head + rest, head.length);
+                setOpen(null);
+              },
+            })),
+          ...people
+            .filter((p) => !open.query || p.name.toLowerCase().split(/\s+/).some((w) => w.startsWith(open.query.toLowerCase())) || p.name.toLowerCase().startsWith(open.query.toLowerCase()))
+            .slice(0, 6)
+            .map((p) => ({
+              key: `person:${p.id}`,
+              label: p.name,
+              hint: p.online ? "Here now · tells them" : "Tells them",
+              icon: "user" as IconName,
+              pick: () => {
+                const el = textarea.current;
+                if (!el) return;
+                const head = `${el.value.slice(0, open.start)}@${p.name} `;
+                setValue(el, head + el.value.slice(el.selectionStart), head.length);
+                setOpen(null);
+              },
+            })),
+        ]
+      : open?.kind === "file" && filesEnabled
+        ? [
+          ...rankFiles(files ?? [], open.query).map((f) => ({
+            key: f,
+            label: f.slice(f.lastIndexOf("/") + 1),
+            hint: f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "",
+            icon: "file" as IconName,
+            pick: () => {
+              const el = textarea.current;
+              if (!el) return;
+              // The path in backticks: every agent reads it as a file, and it can't be taken for a person.
+              const head = `${el.value.slice(0, open.start)}\`${f}\` `;
+              setValue(el, head + el.value.slice(el.selectionStart), head.length);
+              setOpen(null);
+            },
+          })),
+        ]
+        : [];
+
+  /** Call after every change and caret move. */
+  const sync = () => {
+    const el = textarea.current;
+    if (!el) return;
+    const t = tokenAt(el.value, el.selectionStart);
+    // "#" and "@" open their list even with nothing to offer, to say why (2026-10-27 audit: they showed nothing at all).
+    setOpen(t && (t.kind === "command" ? commands : true) ? t : null);
+    setActive(0);
+  };
+
+  /** Whether the list is on screen: its rows, or the line it says while it reads them. */
+  const visible =
+    !!open &&
+    (items.length > 0 ||
+      (open.kind === "file" && filesEnabled && files === null) ||
+      (open.kind === "command" && commands && !!tool) ||
+      // Nothing to offer, said once, while only the sign is typed: "#1" or "@home" in a sentence doesn't pop it up.
+      (open.kind === "file" && !open.query && (!filesEnabled || files !== null)) ||
+      (open.kind === "person" && !open.query));
+
+  /** Returns true when the key was used by the list, so the composer should not act on it. */
+  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    // Enter while an input method is composing confirms the characters, not a pick from the list.
+    if (!open || e.nativeEvent.isComposing) return false;
+    // Escape closes the list even while it is empty or still asking for its commands.
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(null);
+      return true;
+    }
+    // The caret moving sideways may leave the word the list was for: look again once it has moved.
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
+      setTimeout(sync, 0);
+      return false;
+    }
+    // "Save your own command" is the list's last row, reached by the keys as any other is (2026-10-27 audit: it couldn't be, and
+    // Enter on it sent the "/" as a message).
+    const manage = visible && open.kind === "command" && !!onManage;
+    const rows = items.length + (manage ? 1 : 0);
+    // Nothing to pick: Enter is the box's own, and sends. The list goes with it, rather than floating over the feed through the
+    // next turn ("@" with nobody here, "#" with no files; Arun's e2e pass, 2026-11-04).
+    if (!rows) {
+      if (e.key === "Enter" && !e.shiftKey) setOpen(null);
+      return false;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((i) => (i + (e.key === "ArrowDown" ? 1 : rows - 1)) % rows);
+      return true;
+    }
+    if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+      const at = Math.min(active, rows - 1);
+      // Tab past the commands to the last row only by the arrows: a Tab with no commands is the box's own.
+      if (at >= items.length && e.key === "Tab") return false;
+      e.preventDefault();
+      if (at < items.length) items[at]!.pick();
+      else openManage();
+      return true;
+    }
+    return false;
+  };
+
+  /** Opens the place where commands are made, after the press or key that asked: never in the same event (see the row). */
+  const openManage = () => {
+    setOpen(null);
+    setTimeout(() => onManage?.(), 0);
+  };
+
+  const popover =
+    open && visible ? (
+      <div className={`shortcut-pop${below ? " below" : ""}`} role="listbox" aria-label={open.kind === "command" ? "Commands" : open.kind === "person" ? (agents.length && !people.length ? "Agents" : crew.length && !people.length ? "Crew" : "People") : "Files"}>
+        <div className="shortcut-head">{open.kind === "command" ? (tool ? `${tool} commands` : "Commands") : open.kind === "person" ? (agents.length || crew.length ? "Send it to" : "People here") : "Files in the folder"}</div>
+        {open.kind === "file" && filesEnabled && files === null && <div className="shortcut-empty">Reading the folder…</div>}
+        {open.kind === "file" && !filesEnabled && <div className="shortcut-empty">{noFolder}</div>}
+        {open.kind === "file" && filesEnabled && files !== null && !items.length && (
+          <div className="shortcut-empty">{filesWhy ? `${filesWhy.replace(/\.?$/, ".")}` : files.length ? `No file in the folder matches “${open.query}”.` : "The folder has no files to name yet."}</div>
+        )}
+        {open.kind === "person" && !items.length && <div className="shortcut-empty">Nobody else is here yet. Share the session to bring someone in.</div>}
+        {open.kind === "command" && tool && own === null && <div className="shortcut-empty">Asking {tool} for its commands…</div>}
+        {open.kind === "command" && tool && own !== null && !items.length && (
+          <div className="shortcut-empty">
+            {open.query
+              ? `${tool} has no command starting with “${open.query}”.`
+              : tool === "Claude Code"
+                ? "Claude Code lists its commands when it starts, at your first message, and they show here from then on. A command typed now is sent as typed."
+                : tool === "Codex" || tool === "Cursor"
+                  ? `${tool}'s built-in commands only work in its own terminal. Its ${tool === "Codex" ? "prompts (~/.codex/prompts) and skills" : "commands (.cursor/commands) and skills"} show up here.`
+                  : `${tool} lists its commands once it has run here. One typed now is sent to it as typed.`}
+          </div>
+        )}
+        {items.map((it, i) => (
+          <button
+            key={it.key}
+            type="button"
+            role="option"
+            aria-selected={i === active}
+            className={`shortcut-item ${i === active ? "on" : ""}`}
+            // Mouse down, not click: a click blurs the textarea first and the caret is lost.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              it.pick();
+            }}
+            onMouseEnter={() => setActive(i)}
+          >
+            {it.mark ?? <Icon name={it.icon} size={13} />}
+            <span className="shortcut-label">{it.label}</span>
+            {it.hint && (
+              <span className="shortcut-hint" data-tone={it.tone}>
+                {it.hint}
+              </span>
+            )}
+          </button>
+        ))}
+        {open.kind === "command" && onManage && (
+          // Opened on the click, not the press: opened on the press, the dialog's own outside-press listener, set up as it opened,
+          // heard that same press (on a row already gone with the list) and closed it at once, so it seemed to do nothing
+          // (2026-10-27 audit). The press still keeps the caret in the box.
+          <button type="button" className={`shortcut-manage ${active === items.length ? "on" : ""}`} role="option" aria-selected={active === items.length} onMouseDown={(e) => e.preventDefault()} onMouseEnter={() => setActive(items.length)} onClick={openManage}>
+            <Icon name="plus" size={12} /> Save your own command
+          </button>
+        )}
+      </div>
+    ) : null;
+
+  return { popover, onKeyDown, sync, close: () => setOpen(null) };
+}

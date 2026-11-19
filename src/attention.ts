@@ -1,0 +1,300 @@
+import { agentState, approvers, plainError, saysItAll, steersLane, type AgentPhase } from "./agent-state.js";
+import { faceIndex } from "./agent-face.js";
+import { carefulClass } from "./command-class.js";
+import { carriedOn, planLimitHit } from "./limit-reset.js";
+import { laneName } from "./session/core.js";
+import { driverOf, taskAllowApplies, questionsTo, requestsTo, roleOf, runOf, type SessionState } from "./session/projection.js";
+import { MAIN_LANE, type EngineTool } from "./types.js";
+
+/**
+ * What is waiting on one person, across the sessions they are in.
+ *
+ * A session that needs a human says so in its own feed, which works while
+ * somebody is looking at that session and not at all otherwise. An agent can
+ * sit blocked on a decision for an hour because the one person who could
+ * answer is in a different room — and in a product whose whole premise is
+ * several rooms at once, that is the normal case rather than the edge.
+ *
+ * So the question is asked the other way round: not "what is happening here"
+ * but "where am I the thing that is missing".
+ */
+
+/** `ask`: a coding tool ended its turn asking something (ask-parse.ts), where Friday's own agents raise a `question`. */
+export type AttentionKind = "approval" | "question" | "ask" | "control" | "handover" | "stopped" | "mention";
+
+export interface Attention {
+  sid: string;
+  title: string;
+  kind: AttentionKind;
+  /** One line, already written for the person it is about. */
+  text: string;
+  /** Which event started it waiting, so the list can be ordered and deduped. */
+  seq: number;
+  /** The one agent that is waiting, when it is one, and its name as the session shows it. */
+  lane?: string;
+  agent?: string;
+  /** A permission request's id, so it can be answered from the list without opening the session. */
+  approval?: string;
+  /** What the approval is for: a command to run says "Run it", anything else "Let it", as the card in the session does. */
+  command?: boolean;
+  /** A command to look at before saying yes (command-class.ts carefulClass): "Don't" is the main button wherever it is asked. */
+  careful?: true;
+  /** A stopped run's own error, when `text` says it in plain words instead: shown on hover, and in full in the session. */
+  detail?: string;
+  /** An approval's commands, as asked (up to five). */
+  items?: string[];
+  /** "Allow for this task" would apply for you here (projection.ts taskAllowApplies): else only Allow once is offered. */
+  forTask?: true;
+}
+
+/**
+ * Everything in this session waiting on you, worst first: one line per agent, since each blocked agent is its own wait.
+ *
+ * The order is how much it is blocked on you. A permission request or a question stops the agent dead; a control request
+ * only slows somebody down; a stopped run has already happened. A permission request is yours when you drive that agent,
+ * or when nobody does and the session is yours: the people who could answer it, without telling every editor about every
+ * command.
+ */
+export function attentionIn(state: SessionState, meId: string): Attention[] {
+  const of = (kind: AttentionKind, text: string, seq: number, lane?: string): Attention => ({
+    sid: state.id,
+    title: state.title,
+    kind,
+    text,
+    seq,
+    ...(lane ? { lane, agent: agentName(state, lane) } : {}),
+  });
+  const out: Attention[] = [];
+
+  // Asked you by name, one line per agent that asked. Nothing moves until it is answered.
+  for (const q of questionsTo(state, meId)) out.push(of("question", q.question, q.seq, q.lane));
+
+  // Handed to you for when you are next here: the session is yours to drive once you open it.
+  if (state.handover?.to === meId && !state.handover.taken) out.push(of("handover", `${state.handover.from.name} handed this to you${state.handover.note ? `: ${state.handover.note}` : ""}`, state.handover.seq));
+
+  // Somebody wants a wheel you are holding. Their work is waiting on an answer
+  // only you can give: asks for the agents you drive, not for anybody's.
+  const asks = requestsTo(state, meId);
+  if (asks.length) {
+    const first = asks[0]!;
+    const more = asks.length - 1;
+    out.push(of("control", more ? `${first.name} and ${more} other${more === 1 ? "" : "s"} want control` : `${first.name} wants control`, first.seq));
+  }
+
+  for (const lane of [MAIN_LANE, ...state.lanes.map((l) => l.id)]) {
+    const driver = driverOf(state, lane);
+    // A coding tool asking before it runs something: it sits there until somebody says yes or no. Who it waits on is one rule
+    // (agent-state.ts approvers), the one its tab, its sidebar row and the status bar go by: "Needs you" for Ada, "Waiting on
+    // Ada" for everyone else (audit B-14).
+    const ask = state.approvals[lane];
+    if (ask && approvers(state, lane)?.ids.includes(meId)) {
+      const first = ask.items[0] ? `\`${ask.items[0].length > 80 ? `${ask.items[0].slice(0, 79)}…` : ask.items[0]}\`` : "";
+      const more = ask.items.length > 1 ? ` and ${ask.items.length - 1} more` : "";
+      const text = ask.scope === "commands" && first ? `${agentName(state, lane)} wants to run ${first}${more}` : `${agentName(state, lane)} is asking before it goes on`;
+      // The commands themselves, for a page that says them in plain words (the Agents page, plain-risk.ts).
+      out.push({ ...of("approval", text, ask.seq, lane), approval: ask.id, ...(ask.scope === "commands" ? { command: true, items: ask.items.slice(0, 5), ...(taskAllowApplies(state, lane, meId) ? { forTask: true as const } : {}), ...(carefulClass(ask.items) ? { careful: true as const } : {}) } : {}) });
+      continue;
+    }
+    const run = runOf(state, lane);
+    // A coding tool that finished its turn on a question: it does nothing more until somebody answers.
+    const asked = state.asks[lane];
+    if (asked?.questions.length && run.status !== "running" && steersLane(state, meId, lane)) {
+      const more = asked.questions.length - 1;
+      out.push(of("ask", `${asked.questions[0]!.question}${more ? ` (and ${more} more)` : ""}`, asked.seq, lane));
+      continue;
+    }
+    // It stopped, and you are the one who can restart it. Not a coding tool out on its usage limit: Friday hands its task to
+    // another agent and it carries on when the limit lifts, and its tab says so; a card nagging about it sat for an hour on
+    // Arun's screen (2026-10-25: "can you get rid of this for me"). A passing per-minute 429 is an error like any other, worth
+    // trying again (agent-state.ts plainError).
+    // Nor a turn the server's restart cut off (engine/hub.ts): it picks up again by itself when the tool reconnects, so
+    // there's nothing to do. In the desktop app that's every time the app is quit or updated mid-turn.
+    // Nor one not signed in whose task another agent carried on (agent-mesh.ts onLimit): the work isn't waiting on anybody.
+    if (run.status === "error" && driver?.id === meId && !planLimitHit(run.error) && !carriedOn(state, lane) && !/^The server restarted in the middle of /.test(run.error ?? "")) {
+      // Said in plain words where it is listed, as everywhere (agent-state.ts plainError); the tool's own words stay in `detail`.
+      const said = `Hit an error · ${plainError(run.error)}`;
+      out.push({ ...of("stopped", said, run.sinceSeq, lane), ...(run.error && !saysItAll(run.error) ? { detail: run.error } : {}) });
+    }
+  }
+
+  // A message from another session waiting for someone who can steer its agent to let it through: it sat there unseen.
+  for (const h of state.peersHeld ?? []) {
+    if (steersLane(state, meId, h.lane)) out.push(of("ask", `${h.fromName} in "${h.fromTitle}" sent a message: let it through or turn it down`, h.seq, h.lane));
+  }
+
+  // Somebody said your name: it waits until you say or do anything in the session (projection clears it).
+  const named = state.mentions?.[meId];
+  if (named) out.push(of("mention", `${named.byName}: ${named.text}`, named.seq, named.lane === MAIN_LANE ? undefined : named.lane));
+  return sortAttention(out);
+}
+
+/** The worst thing in this session waiting on you, or null: one line per session, where a list of sessions is what is shown. */
+export function attentionFor(state: SessionState, meId: string): Attention | null {
+  return attentionIn(state, meId)[0] ?? null;
+}
+
+/** "Claude Code", "Reviewer", or Friday's own agent: the lane tabs say "Main", which means nothing outside the session. */
+function agentName(state: SessionState, lane: string): string {
+  const name = laneName(state, lane);
+  return lane === MAIN_LANE && name === "Main" ? "Friday Code" : name;
+}
+
+/** Newest first: what just started waiting is what somebody is standing next to. */
+export function sortAttention(items: Attention[]): Attention[] {
+  const rank: Record<AttentionKind, number> = { approval: 0, question: 0, ask: 0, handover: 1, control: 1, mention: 1, stopped: 2 };
+  return [...items].sort((a, b) => rank[a.kind] - rank[b.kind] || b.seq - a.seq);
+}
+
+/**
+ * Whether a session is working right now, and on what.
+ *
+ * "Which of these is actually doing something" is a question the sidebar
+ * could not answer at all: every session looked the same whether an agent
+ * had been running in it for ten minutes or nobody had touched it since
+ * Tuesday. The log already knows — a run is running or it is not — and the
+ * attention poll already reads every recent session's state to ask a
+ * different question, so this costs nothing extra.
+ */
+export interface Working {
+  sid: string;
+  /** How many lanes are going, so several agents at once reads as several. */
+  lanes: number;
+  /** One of them, for the tooltip: an agent's lane, or the main one. */
+  what: string;
+  /** The coding tool the first of them runs on, for its mark beside its name; none for Friday Code. */
+  tool?: EngineTool;
+  /** When the liveliest of them was last heard from (projection.ts heardAt), for "no update in 14m" once it has gone quiet. */
+  heardAt?: number;
+}
+
+/** When a lane's agent was last heard from: its last event, or when its run began, whichever is later. */
+export const heardOf = (state: SessionState, lane: string): number | undefined => {
+  const at = Math.max(state.heardAt?.[lane] ?? 0, runOf(state, lane).sinceAt ?? 0);
+  return at || undefined;
+};
+
+export function workingIn(state: SessionState): Working | null {
+  const live: string[] = [];
+  let tool: EngineTool | undefined;
+  const add = (lane: string, name: string) => {
+    if (!live.length) tool = state.engines[lane]?.tool;
+    live.push(name);
+  };
+  if (state.run.status === "running") add(MAIN_LANE, "Main");
+  for (const [id, run] of Object.entries(state.laneRuns)) {
+    if (run.status !== "running") continue;
+    add(id, state.lanes.find((l) => l.id === id)?.name ?? "a lane");
+  }
+  if (!live.length) return null;
+  const lanesLive = [...(state.run.status === "running" ? [MAIN_LANE] : []), ...Object.entries(state.laneRuns).filter(([, r]) => r.status === "running").map(([id]) => id)];
+  const heard = Math.max(0, ...lanesLive.map((l) => heardOf(state, l) ?? 0));
+  return { sid: state.id, lanes: live.length, what: live.join(", "), ...(tool ? { tool } : {}), ...(heard ? { heardAt: heard } : {}) };
+}
+
+/**
+ * Who works in a session and where each stands, for its row in the sidebar (Arun, 2026-10-24: "instead of the secondary text like
+ * the most recent message maybe we add the agent status and stuff with their icons"): each agent's name, the coding tool it runs
+ * on and its state in a word, read off the state the attention poll has already read, so it costs nothing extra.
+ */
+export type CrewState = "needs" | "waiting" | "working" | "failed" | "limited" | "offline" | "done" | "short" | "stopped" | "idle";
+export interface Crew {
+  sid: string;
+  /**
+   * Each agent as the one selector has it for the person asking (agent-state.ts agentState): `state` its kind, `word` its words
+   * ("Waiting on Ada", "Hit an error"), the same words its tab and the status bar use. `plan`: "3 of 5", where it stopped with its
+   * plan short ("short"). While it works, `doing` is its latest step and `heardAt` when it last said anything; stopped on an error,
+   * `why` is the error's first line and `plain` what it means; out of usage, `until` when it lifts.
+   */
+  agents: { lane: string; name: string; tool?: EngineTool; /** Friday's own agent's face (agent-face.ts), the same one its tab and its replies wear. */ face?: number; state: CrewState; word: string; /** Held up on the person asking: only then is it amber. */ you?: true; plan?: string; doing?: { name: string; target?: string }; heardAt?: number; why?: string; plain?: string; until?: number | null }[];
+  /** A crew mate has its work now (crew.handed): "Kit is on it", and the lanes it works on it in here, for one handed before it went to the crew mate's own thread (crew-carry.ts). */
+  handed?: string;
+  handedLanes?: string[];
+}
+/** The most agents a row shows. */
+const CREW_MAX = 6;
+
+const CREW_OF: Record<AgentPhase, CrewState> = { needs: "needs", waiting: "waiting", working: "working", paused: "waiting", failed: "failed", limited: "limited", offline: "offline", stopped: "stopped", short: "short", done: "done", ready: "idle" };
+
+/**
+ * Each agent in a session and where it stands, for the person `meId` (audit B-14: a question to Ada read "needs you" on everyone's
+ * row). `hostUp`: whether the computer a lane's tool runs on is linked now. A tool that isn't attached is only offline when its
+ * computer is: after a restart every finished session's tool read "Offline" until it was sent something, though the computer was
+ * right here (2026-11-04 end-to-end check).
+ */
+export function crewOf(state: SessionState, hostUp?: (hostId: string) => boolean, meId = ""): Crew | null {
+  const lanes = [MAIN_LANE, ...state.lanes.filter((l) => l.control.kind !== "standing").map((l) => l.id)];
+  // The main lane counts once something is in it: a coding tool attached, or a run that has gone; a session of coding tools
+  // alone has an empty main lane that is no one.
+  const used = (lane: string) => lane !== MAIN_LANE || !!state.engines[MAIN_LANE] || !!state.finished?.[MAIN_LANE] || state.run.status !== "idle" || state.lanes.length === 0;
+  const agents = lanes.filter(used).map((lane) => {
+    const engine = state.engines[lane];
+    const now = agentState(state, lane, meId, hostUp ? { hostUp } : {});
+    const st = CREW_OF[now.phase];
+    const plan = state.planDone?.[lane];
+    const doing = st === "working" ? state.doing?.[lane] : undefined;
+    const heard = st === "working" ? heardOf(state, lane) : undefined;
+    const why = now.error?.raw.trim().split(/\r?\n/)[0]?.slice(0, 160);
+    return { lane, name: laneName(state, lane), ...(engine?.tool ? { tool: engine.tool } : { face: faceIndex(state, lane) }), state: st, word: now.word, ...(now.needsYou ? { you: true as const } : {}), ...(st === "short" && plan ? { plan: `${plan.done} of ${plan.of}` } : {}), ...(doing ? { doing } : {}), ...(heard ? { heardAt: heard } : {}), ...(now.error ? { plain: now.error.plain, ...(why ? { why } : {}) } : {}), ...(now.until !== undefined ? { until: now.until } : {}) };
+  });
+  // A lane handed on to a crew mate: the row's own line says who has it, no badge of its own (Code and Crew, connected, 2026-11-13:
+  // "The sidebar row says 'Kit is on it'").
+  const live = Object.values(state.handed ?? {}).filter((h) => !h.back && ["asked", "waiting", "queued", "running", "input"].includes(h.state));
+  const handed = live.length ? { handed: `${live[0]!.mateName} is on it`, handedLanes: live.flatMap((h) => (h.jobLane && !h.jobSid ? [h.jobLane] : [])) } : {};
+  return agents.length ? { sid: state.id, agents: agents.slice(0, CREW_MAX), ...handed } : null;
+}
+
+/**
+ * What a session is about, in a line, for a list of them.
+ *
+ * A list of titles only tells you what you called each one, which is rarely
+ * what you are trying to remember when you look for it — that is what was
+ * last asked. The projection already keeps that as the session's current
+ * intent, so this is a read of something known, not a new thing to track.
+ */
+export interface Preview {
+  sid: string;
+  text: string;
+  /** Who said it, so a room with several people reads as one. */
+  by: string;
+}
+
+/** The session's pull request, for the sidebar to settle the session once it merges (sidebar-buckets.ts). */
+export interface SessionPr {
+  sid: string;
+  url: string;
+  merged: boolean;
+  /** Every pull request the session opened, oldest first (projection.ts prs): the sidebar's badge. */
+  urls?: string[];
+}
+
+export function prOf(state: SessionState): SessionPr | null {
+  const urls = state.prs ?? [];
+  const last = state.pr?.url ?? urls.at(-1);
+  return last ? { sid: state.id, url: last, merged: !!state.pr?.merged && state.pr.url === last, ...(urls.length ? { urls } : {}) } : null;
+}
+
+export function previewOf(state: SessionState): Preview | null {
+  const last = state.lastInstruction;
+  const text = last?.text.replace(/\s+/g, " ").trim();
+  if (!last || !text) return null;
+  return { sid: state.id, text: text.slice(0, 160), by: last.by };
+}
+
+/**
+ * Since when a session has stood as it does now, for the time on its row in the sidebar (Herdr's "time since its state changed",
+ * 2026-11-01): what waits on you, since it began waiting; work under way, since the longest-running turn began; finished, since
+ * the last turn ended. Null when nothing has happened in it yet, or its state is from before this was kept.
+ */
+export function sinceOf(state: SessionState, needs: readonly Attention[]): number | null {
+  const runs = [{ lane: MAIN_LANE, ...state.run }, ...Object.entries(state.laneRuns).map(([lane, r]) => ({ lane, ...r }))];
+  const at = (xs: (number | undefined)[]) => xs.filter((x): x is number => typeof x === "number" && x > 0);
+  const waiting = at(needs.map((n) => runs.find((r) => r.lane === (n.lane ?? MAIN_LANE))?.sinceAt));
+  if (needs.length) return waiting.length ? Math.min(...waiting) : null;
+  const working = at(runs.filter((r) => r.status === "running").map((r) => r.sinceAt));
+  if (working.length) return Math.min(...working);
+  const done = at(runs.filter((r) => r.status !== "running" && (state.finished?.[r.lane] ?? 0) > 0).map((r) => r.sinceAt));
+  return done.length ? Math.max(...done) : null;
+}
+
+/** The latest seq at which one of a session's agents finished a turn well (state.finished), or 0: what "unread" is measured against. */
+export const finishedSeq = (state: SessionState): number => Math.max(0, ...Object.values(state.finished ?? {}));

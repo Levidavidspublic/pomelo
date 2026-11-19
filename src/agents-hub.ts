@@ -1,0 +1,243 @@
+import { describeCall, doingNow, stoppedLine } from "./activity-line.js";
+import { laneLabel, latestPlan } from "./left-off.js";
+import { plainLine } from "./client/work-outputs.js";
+import { carriedOn, clockUntil, limitHit, signedOut } from "./limit-reset.js";
+import { limitedLanes } from "./limited.js";
+import { commandFailed, TEST_CMD } from "./receipt.js";
+import { driverOf, givenName, runOf, type SessionState } from "./session/projection.js";
+import { agentState, type AgentNow, type AgentPhase } from "./agent-state.js";
+import { engineName, MAIN_LANE, type EngineMode, type EngineTool, type SessionEvent } from "./types.js";
+
+/**
+ * The session's agents at a glance, for the Agents hub: each one's state in a word and what it is doing in a line, how far
+ * through its plan, who is driving it, on which model and mode; what has changed across all of them; how the checks came out;
+ * and the last few things any of them did. Read from what the session already holds, so the hub is a view, never a second
+ * source that can disagree.
+ */
+export type AgentStatus = "working" | "waiting" | "paused" | "offline" | "limited" | "failed" | "done" | "ready";
+/** A phase as the older, coarser status the hub's readers sort and colour by. */
+const STATUS: Record<AgentPhase, AgentStatus> = { needs: "waiting", waiting: "waiting", working: "working", paused: "paused", failed: "failed", limited: "limited", offline: "offline", stopped: "ready", short: "done", done: "done", ready: "ready" };
+
+export interface HubAgent {
+  lane: string;
+  name: string;
+  tool: EngineTool | null;
+  status: AgentStatus;
+  /** "Editing routes/billing.ts", "Needs you: rm -rf build", the first line of its answer. */
+  line: string;
+  /** Plan steps done and in all, when it has a plan. */
+  plan: { done: number; total: number } | null;
+  driver: { id: string; name: string } | null;
+  /** When the run it is in (or last finished) started, and when it finished. */
+  startedAt: number | null;
+  endedAt: number | null;
+  /** The model the host picked for it (none: the tool's default), its mode, and the branch it works on. */
+  model: string | null;
+  mode: EngineMode | null;
+  branch: string | null;
+  /** A request to run something, waiting on an answer. */
+  ask: { id: string; items: string[]; scope: string } | null;
+  /**
+   * Held up on the person looking: a question put to them, or a permission or a decision on an agent they steer. "waiting"
+   * alone can be on somebody else; this is what the agent rail, the needs-you count and ⌘J go by.
+   */
+  needsYou: boolean;
+  /** Where it stands as the one selector says it (agent-state.ts), for every place that shows it: its phase and words. */
+  now: AgentNow;
+  /**
+   * Tokens it has used in this session, read and written, as its turns counted them (agent.usage; Friday's own steps carry theirs):
+   * whose subscription the session is spending, at a glance (Arun, 2026-10-25). Cache reads left out, as tool-usage.ts leaves them.
+   */
+  tokens: number;
+}
+
+export interface HubFile {
+  path: string;
+  adds: number;
+  dels: number;
+  /** The agents whose change sets have it: more than one is a file two agents are both changing. */
+  lanes: string[];
+}
+
+export interface HubCheck {
+  kind: "tests" | "typecheck" | "lint" | "build";
+  command: string;
+  ok: boolean;
+  /** "9 passed", "2 failing", "0 errors", or nothing when the output says no count. */
+  summary: string;
+  ts: number;
+  /** Which agent ran it, and the end of what it printed: what "Ask to fix" hands back. */
+  lane: string;
+  output: string;
+}
+
+export interface HubStep {
+  lane: string;
+  /** "Edited login.js", "Ran npm test". */
+  text: string;
+  ts: number;
+  failed: boolean;
+}
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+
+/** A step said as done, for a list of what already happened: "Running npm test" → "Ran npm test". */
+const PAST: Record<string, string> = { Reading: "Read", Looking: "Looked", Searching: "Searched", Editing: "Edited", Writing: "Wrote", Running: "Ran", Starting: "Started", Checking: "Checked", Stopping: "Stopped", Asking: "Asked", Handing: "Handed", Deploying: "Deployed", Making: "Made", Adding: "Added", Using: "Used" };
+const past = (s: string) => s.replace(/^\w+/, (w) => PAST[w] ?? w);
+
+const KIND: [HubCheck["kind"], { test(s: string): boolean }][] = [
+  ["typecheck", /\btsc\b|typecheck|type-check|\bmypy\b|\bpyright\b/i],
+  ["lint", /\blint\b|eslint|ruff|clippy|golangci/i],
+  // A build is a build tool asked to build, not any command with the word in it ("rm -rf build" is not one).
+  ["build", /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b|\b(?:cargo|go|gradle|dotnet|swift)\s+build\b|\btsc\s+(?:-b|--build)\b|\bvite\s+build\b|\bnext\s+build\b|^make\b/i],
+  ["tests", TEST_CMD],
+];
+
+/** A count the output states, in the words tools use: "9 passed", "2 failing", "0 errors". */
+function summaryOf(kind: HubCheck["kind"], ok: boolean, output: string): string {
+  const pass = output.match(/(\d+)\s+(passed|passing)/i);
+  const fail = output.match(/(\d+)\s+(failed|failing)/i);
+  const errs = output.match(/(\d+)\s+errors?\b/i);
+  if (kind === "tests") return fail && !ok ? `${fail[1]} failing` : pass ? `${pass[1]} passed` : ok ? "passed" : "failed";
+  if (errs) return `${errs[1]} error${errs[1] === "1" ? "" : "s"}`;
+  return ok ? (kind === "typecheck" ? "0 errors" : "ok") : "failed";
+}
+
+/**
+ * What one message says for the hub, read once: an event never changes, and the hub is worked out again on every live event,
+ * over the whole log (Arun, 2026-10-30: "the app feel laggy when running a lot of tasks and agents").
+ */
+type Read = { answer: string; calls: { id: string; text: string; command: string }[]; plans: boolean };
+const readMessages = new WeakMap<SessionEvent, Read>();
+function readMessage(e: SessionEvent): Read {
+  const had = readMessages.get(e);
+  if (had) return had;
+  const b = e.body as Extract<SessionEvent["body"], { type: "agent.message" }>;
+  const calls = b.toolCalls
+    .filter((c) => c.name !== "update_plan")
+    .map((c) => {
+      let command = "";
+      if (c.name === "run_command" || c.name === "shell") {
+        try {
+          command = String((JSON.parse(c.arguments || "{}") as { command?: unknown }).command ?? "").trim();
+        } catch {
+          // Arguments that aren't JSON name no command.
+        }
+      }
+      return { id: c.id, text: past(describeCall(c)), command };
+    });
+  const plans = b.toolCalls.some((c) => c.name === "update_plan" || c.name === "todo");
+  const read = { answer: b.text.trim() ? (b.text.trim().split("\n").find((l) => l.trim()) ?? "") : "", calls, plans };
+  readMessages.set(e, read);
+  return read;
+}
+
+/** `meId`: who is looking, so their own tools read as just "Claude Code" and somebody else's as "Maya's Claude Code". */
+export function hubOf(state: SessionState, events: SessionEvent[], meId = ""): { agents: HubAgent[]; files: HubFile[]; checks: HubCheck[]; recent: HubStep[] } {
+  const lanes = [MAIN_LANE, ...state.lanes.map((l) => l.id)];
+  // Per lane: when its current or last run started and ended, how that ended, its last words.
+  const runs = new Map<string, { started: number | null; ended: number | null; outcome: string | null; error: string; answer: string }>();
+  const calls = new Map<string, { command: string; step: HubStep }>();
+  const steps: HubStep[] = [];
+  const checks = new Map<HubCheck["kind"], HubCheck>();
+  const spent = new Map<string, number>();
+  // Each lane's last message with a plan in it, for latestPlan: it looked for it from the end of the log, for each lane.
+  const plans = new Map<string, SessionEvent>();
+  for (const e of events) {
+    const lane = e.lane ?? MAIN_LANE;
+    if (e.body.type === "agent.usage") spent.set(lane, (spent.get(lane) ?? 0) + e.body.input + e.body.output);
+    else if (e.body.type === "agent.message" && e.body.tokens) spent.set(lane, (spent.get(lane) ?? 0) + e.body.tokens);
+    const r = runs.get(lane) ?? { started: null, ended: null, outcome: null, error: "", answer: "" };
+    runs.set(lane, r);
+    const b = e.body;
+    if (b.type === "run.started") Object.assign(r, { started: e.ts, ended: null, outcome: null, error: "", answer: "" });
+    else if (b.type === "run.ended") Object.assign(r, { ended: e.ts, outcome: b.outcome, error: b.error ?? "" });
+    else if (b.type === "agent.message") {
+      const read = readMessage(e);
+      if (read.answer) r.answer = read.answer;
+      if (read.plans) plans.set(lane, e);
+      for (const c of read.calls) {
+        const step = { lane, text: c.text, ts: e.ts, failed: false };
+        steps.push(step);
+        calls.set(c.id, { command: c.command, step });
+      }
+    } else if (b.type === "tool.result") {
+      const call = calls.get(b.callId);
+      const failed = commandFailed(b);
+      if (call && b.isError) call.step.failed = true;
+      if (!call?.command || failed === null) continue;
+      const kind = KIND.find(([, re]) => re.test(call.command))?.[0];
+      if (kind) checks.set(kind, { kind, command: clip(call.command, 48), ok: !failed, summary: summaryOf(kind, !failed, b.output), ts: e.ts, lane, output: b.output.slice(-1500) });
+    }
+  }
+
+  const limited = limitedLanes(state, events);
+  const agents = lanes.map((lane): HubAgent => {
+    const engine = state.engines[lane];
+    const r = runs.get(lane);
+    const run = runOf(state, lane).status;
+    const ask = state.approvals[lane];
+    const planned = plans.get(lane);
+    const plan = planned ? latestPlan([planned], lane) : [];
+    const base = {
+      lane,
+      name: engine?.tool ? (engine.hostId === meId ? (givenName(state, lane) ?? engineName(engine.tool)) : `${engine.hostName.split(/\s+/)[0]}'s ${givenName(state, lane) ?? engineName(engine.tool)}`) : laneLabel(state, lane),
+      tool: engine?.tool ?? null,
+      plan: plan.length ? { done: plan.filter((s) => s.done).length, total: plan.length } : null,
+      driver: driverOf(state, lane),
+      startedAt: r?.started ?? null,
+      endedAt: r?.ended ?? null,
+      model: engine?.model ?? null,
+      mode: engine?.mode ?? null,
+      branch: engine?.branch ?? null,
+      ask: ask ? { id: ask.id, items: ask.items, scope: ask.scope } : null,
+      tokens: spent.get(lane) ?? 0,
+    };
+    // Where it stands, from the one selector every view uses (agent-state.ts): who it waits on, and in what words.
+    const now = agentState(state, lane, meId, { limited: limited.get(lane) ?? null });
+    const status = STATUS[now.phase];
+    // Nobody looking (a page with no one signed in, a test): every wait reads as the reader's, as before there were names.
+    const needsYou = now.needsYou || (!meId && !!now.held);
+    const rest = { ...base, now: needsYou && !now.needsYou ? { ...now, phase: "needs" as const, word: "Needs you", needsYou } : now, needsYou, status };
+    const on = now.held ? (needsYou ? "you" : now.held.names.length ? now.held.names.join(" and ") : "a person") : "";
+    const question = state.openQuestions[lane];
+    const decision = run !== "running" ? state.asks[lane]?.questions[0] : undefined;
+    if (now.held?.kind === "question" && question) return { ...rest, line: `${needsYou ? "Asking you" : `Asking ${on}`}: ${clip(question.question.split("\n")[0]!, 44)}` };
+    if (now.held?.kind === "approval" && ask) return { ...rest, line: ask.items.length ? `${needsYou ? "Needs you" : now.word}: ${clip(ask.items[0]!, 44)}` : rest.now.word };
+    if (now.held?.kind === "ask" && decision) return { ...rest, line: `${needsYou ? "Needs a decision" : now.word}: ${clip(decision.question, 44)}` };
+    if (now.held) return { ...rest, line: rest.now.word };
+    if (now.phase === "working") return { ...rest, line: doingNow(events, lane)?.text ?? "Working" };
+    if (now.phase === "paused") return { ...rest, line: "Paused" };
+    // Out of usage, its own or its account's (limited.ts), with when it comes back; once that has passed, ready again.
+    if (now.phase === "limited") {
+      const out = limited.get(lane);
+      return { ...rest, line: `Out of usage${now.until ? ` until ${clockUntil(now.until)}` : ""}${out?.via ? ` · same account as ${laneLabel(state, out.via)}` : ""}` };
+    }
+    if (now.phase === "failed") return { ...rest, line: clip(`Hit an error · ${now.error?.plain ?? "something went wrong"}`, 60) };
+    if (now.phase === "offline") return { ...rest, line: engine?.hostId === meId ? "Offline · reconnect it from the chat" : `Offline · ${(engine?.hostName ?? "their").split(/\s+/)[0]}'s computer` };
+    // Not signed in on its computer, its task carried on by another agent here: nothing is stopped (Arun, 2026-10-28).
+    if (r?.outcome === "error" && signedOut(r.error) && carriedOn(state, lane)) return { ...rest, line: "Not signed in · its work carried on" };
+    if (r?.outcome === "error" && limitHit(r.error)) return { ...rest, line: "Usage back · ready for a task" };
+    if (now.phase === "stopped") return { ...rest, line: "Stopped" };
+    // Its words, not its Markdown: the line is a tab's name and tip, read out as "star star Notes star star" before (2026-11-04 QA).
+    // Stopped short of its plan, its word says so ("Stopped at 1 of 2"); its line is still what it said.
+    if (now.phase === "done" || now.phase === "short") return { ...rest, line: clip(plainLine(r?.answer ?? "") || now.word, 60) };
+    return { ...rest, line: "Ready for a task" };
+  });
+
+  const byPath = new Map<string, HubFile>();
+  for (const lane of lanes)
+    for (const f of state.diffs[lane]?.files ?? []) {
+      const had = byPath.get(f.path);
+      if (had) (had.lanes.push(lane), (had.adds = Math.max(had.adds, f.additions)), (had.dels = Math.max(had.dels, f.deletions)));
+      else byPath.set(f.path, { path: f.path, adds: f.additions, dels: f.deletions, lanes: [lane] });
+    }
+
+  const order: HubCheck["kind"][] = ["tests", "typecheck", "lint", "build"];
+  return {
+    agents,
+    files: [...byPath.values()],
+    checks: order.flatMap((k) => (checks.get(k) ? [checks.get(k)!] : [])),
+    recent: steps.slice(-6).reverse(),
+  };
+}

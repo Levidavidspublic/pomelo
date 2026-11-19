@@ -1,0 +1,131 @@
+/* The daily brief (DailyBrief.tsx): the Away brief's lines (teammates.css .tm-brief-*), grouped under quiet headings, on the
+   home screen as a section like "Since you left", and in a panel at the right. */
+
+.db-card { width: 100%; max-width: 656px; margin-top: 28px; }
+.db-card .ha-head { margin-bottom: 6px; }
+.db-card .ha-link:first-of-type { margin-left: auto; }
+.db-card .db-x { margin-left: 0; }
+.db-range { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.db-headline { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; }
+.db-card .db-body { padding: 4px 14px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
+
+.db-body { display: flex; flex-direction: column; }
+.db-section { padding: 10px 0 8px; }
+.db-section + .db-section { border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
+.db-section h4 { display: flex; align-items: baseline; gap: 6px; margin: 0 0 6px; color: var(--text-muted); font-size: 12px; font-weight: 600; }
+.db-count { color: var(--faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+.db-who { color: var(--ink); font-weight: 600; }
+.db-ic { width: 18px; }
+.db-ic .tt-face, .db-ic svg { flex: none; }
+.tm-brief-line[data-tone="plan"] .tm-brief-ic { color: var(--text-muted); }
+.db-more { padding-left: 25px; color: var(--faint); font-size: 12px; list-style: none; }
+.db-meta { display: inline-flex; align-items: center; height: 20px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.db-proof { gap: 4px; color: color-mix(in srgb, var(--dass-ok, var(--green)) 80%, var(--ink)); }
+
+.db-usage { display: flex; flex-direction: column; gap: 12px; margin: 2px 0 0; padding: 0; list-style: none; }
+.db-tool { display: flex; flex-direction: column; gap: 7px; }
+.db-tool-head { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.db-tool-head b { color: var(--ink); font-weight: 600; }
+.db-tokens { margin-left: auto; color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.db-windows { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px 18px; }
+.db-window { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.db-window-top { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.db-window-label { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.db-pct { margin-left: auto; color: var(--ink-2); font-weight: 500; font-variant-numeric: tabular-nums; }
+.db-bar { display: block; height: 4px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--ink) 9%, transparent); }
+.db-bar i { display: block; height: 100%; min-width: 0; border-radius: inherit; background: color-mix(in srgb, var(--ink) 45%, transparent); transition: width .3s ease; }
+.db-window[data-level="high"] .db-pct { color: var(--mate-limited, var(--ink)); font-weight: 600; }
+.db-window[data-level="high"] .db-bar i { background: var(--mate-limited, var(--ink)); }
+.db-window[data-level="full"] .db-pct { color: color-mix(in srgb, var(--red) 85%, var(--ink)); font-weight: 600; }
+.db-window[data-level="full"] .db-bar i { background: color-mix(in srgb, var(--red) 85%, var(--ink)); }
+@media (prefers-reduced-motion: reduce) { .db-bar i { transition: none; } }
+
+.db-sheet { gap: 0; width: min(460px, 100vw); max-width: none; }
+.db-sheet-head { display: flex; flex-direction: column; gap: 4px; padding: 18px 48px 12px 20px; border-bottom: 1px solid var(--border); }
+.db-sheet-head h2 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+.db-sheet-head p { margin: 0; color: var(--text-muted); font-size: 13px; text-wrap: pretty; }
+.db-sheet-body { flex: 1; min-height: 0; padding: 2px 20px 12px; overflow-y: auto; }
+.db-sheet-body .tm-brief-quiet { padding: 16px 0; font-size: 13px; }
+
+.db-schedule { display: flex; flex-direction: column; gap: 6px; padding: 14px 20px 16px; border-top: 1px solid var(--border); }
+.db-time { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; color: var(--ink); font-size: 13px; }
+.db-time[data-off] .db-time-label { color: var(--text-muted); }
+.db-time-label { font-weight: 500; }
+.db-time input { height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--card); color: var(--ink); font: 500 13px var(--font); font-variant-numeric: tabular-nums; }
+.db-time input:disabled { opacity: .5; }
+.db-time input:focus-visible { outline: none; box-shadow: var(--dass-ring, 0 0 0 2px var(--ink)); }
+.db-zone { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }
+
+.db-note { position: fixed; top: 52px; right: 16px; z-index: 40; display: flex; align-items: center; gap: 12px; max-width: min(440px, calc(100vw - 32px)); padding: 10px 10px 10px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-pop); color: var(--ink-2); font-size: 13px; animation: db-in .24s cubic-bezier(.2, .8, .2, 1) both; }
+.db-note b { color: var(--ink); }
+@keyframes db-in { from { opacity: 0; transform: translateY(-6px); } }
+@media (prefers-reduced-motion: reduce) { .db-note { animation: none; } }
+/* Your goals (Goals.tsx, goals.ts): one row each, a dot for how it stands, where it is and how far it got on the right. */
+.goals-card .goals-list { margin: 0; padding: 4px 6px; list-style: none; }
+.goal-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px; border: 0; border-radius: 10px; background: none; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.goal-row:hover { background: var(--hover); }
+.goal-dot { display: grid; flex: none; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--success, #3fb27f); color: var(--bg); }
+.goal-row[data-status="at-risk"] .goal-dot { background: var(--amber, #d98404); }
+.goal-row[data-status="waiting"] .goal-dot { background: var(--accent-blue, #4c8dff); }
+.goal-row[data-status="met"] .goal-dot { background: var(--faint); }
+.goal-main { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.goal-name { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.goal-meta { overflow: hidden; color: var(--text-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.goal-row[data-status="at-risk"] .goal-meta { color: var(--ink-2); }
+.goal-side { display: flex; flex: none; flex-direction: column; align-items: flex-end; max-width: 40%; color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.goal-side span { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Ready to ship (ReadyCard.tsx): each agent's finished work, what proves it, how big, and the two things to do with it. */
+.ready-said { margin: 0 0 6px; color: var(--text-muted); font-size: 12.5px; }
+.ready-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ready-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; }
+.ready-mark { display: grid; flex: none; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--hover); position: relative; }
+.ready-mark::after { content: ""; position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--panel, var(--bg)); background: var(--faint); }
+.ready-row[data-proof="ok"] .ready-mark::after { background: var(--green, #3fb27f); }
+.ready-row[data-proof="bad"] .ready-mark::after { background: var(--red, #e5484d); }
+.ready-main { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.ready-name { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.ready-meta { overflow: hidden; color: var(--text-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ready-add, .ready-del { font-weight: 500; font-variant-numeric: tabular-nums; }
+.ready-add { color: var(--green, #3fb27f); }
+.ready-del { color: var(--red, #e5484d); }
+.ready-acts { display: flex; flex: none; gap: 6px; }
+.ready-btn { height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel, var(--bg)); color: var(--ink); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; text-decoration: none; white-space: nowrap; }
+.ready-btn:hover { background: var(--hover); }
+.ready-go { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.ready-go:hover { background: var(--ink-2); }
+.ready-go:disabled { opacity: 0.45; cursor: default; }
+.ready-quiet { border-color: transparent; background: none; color: var(--text-muted); font-weight: 500; }
+.ready-quiet:hover { color: var(--ink); }
+.ready-more { margin: 4px 0 0 8px; padding: 4px 0; border: 0; background: none; color: var(--text-muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.ready-more:hover { color: var(--ink); }
+.ready-back { display: flex; gap: 6px; padding: 0 8px 8px 44px; }
+.ready-back input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; font-size: 13px; }
+@media (max-width: 640px) {
+  .ready-row { flex-wrap: wrap; }
+  .ready-acts { width: 100%; padding-left: 36px; }
+  .ready-back { padding-left: 8px; }
+}
+
+/* A row each, designed again (Arun, 2026-11-02: "design this better for production too"): face, who and what in up to two
+   lines, and on the right what goes with it, a pull request, its files, a tick where it was checked; its room said once at the
+   list's head when every row shares it. */
+.db-line { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 2px 9px; padding: 5px 6px; margin: 0 -6px; border-radius: 8px; }
+.db-line:hover { background: var(--hover); }
+.db-line .tm-brief-ic { height: 20px; }
+.db-text { display: -webkit-box; min-width: 0; padding: 0; border: 0; background: none; color: var(--ink-2); font: 13px/1.5 var(--font); text-align: left; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; cursor: default; }
+button.db-text { cursor: pointer; }
+button.db-text:hover { color: var(--ink); text-decoration: none; }
+.db-where { color: var(--text-muted); }
+.db-line-meta { display: inline-flex; align-items: center; gap: 8px; height: 20px; }
+.db-line-meta .db-meta { height: auto; color: var(--text-muted); }
+.db-proof { display: inline-flex; color: var(--dass-ok, var(--green)); }
+.db-pr { display: inline-flex; align-items: center; gap: 3px; color: var(--pr-ready, var(--green)); font-size: 12px; font-weight: 500; text-decoration: none; font-variant-numeric: tabular-nums; }
+.db-pr.merged { color: var(--pr-merged, var(--violet)); }
+.db-pr:hover { text-decoration: underline; }
+.db-section h4 { align-items: center; }
+.db-section-where { margin-left: auto; color: var(--text-muted); font-weight: 500; }
+.db-more { padding: 4px 0 0 27px; }
+.db-more-go { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: var(--ink-2); font: 500 12px var(--font); cursor: pointer; }
+.db-more-go:hover { color: var(--ink); }
+.db-sheet-body { overflow-x: hidden; }
