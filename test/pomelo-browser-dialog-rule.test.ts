@@ -12,16 +12,21 @@ type DialogCase = [
 const page = { origin: "https://localhost", message: "Continue?" };
 const unapproved = { step: "other", approved: false, acceptedDialog: false } as const;
 const approvedSubmit = { step: "submit", approved: true, acceptedDialog: false } as const;
+const approvedOther = { ...unapproved, approved: true };
 const afterAccept = { ...approvedSubmit, acceptedDialog: true };
 
 const cases: DialogCase[] = [
   ["dismisses an alert", { ...page, type: "alert" }, unapproved, "dismiss"],
   ["holds an unapproved confirm", { ...page, type: "confirm" }, unapproved, "hold"],
+  ["holds a confirm during an approved other step", { ...page, type: "confirm" }, approvedOther, "hold"],
+  ["accepts a confirm during an approved fill", { ...page, type: "confirm" },
+    { ...approvedSubmit, step: "fill" }, "accept"],
   ["accepts a confirm during an approved submit", { ...page, type: "confirm" }, approvedSubmit, "accept"],
   ["holds a second confirm in the same step", { ...page, type: "confirm" }, afterAccept, "hold"],
   ["accepts beforeunload during an approved import", { ...page, type: "beforeunload", message: "" },
     { ...approvedSubmit, step: "import" }, "accept"],
   ["dismisses beforeunload to stay on the page", { ...page, type: "beforeunload" }, unapproved, "dismiss"],
+  ["dismisses beforeunload during an approved other step", { ...page, type: "beforeunload" }, approvedOther, "dismiss"],
   ["holds beforeunload after an acceptance in the same step", { ...page, type: "beforeunload" }, afterAccept, "hold"],
   ["dismisses a harmless prompt", { ...page, type: "prompt" }, approvedSubmit, "dismiss"],
   ["holds a prompt during a fill", { ...page, type: "prompt" }, { ...approvedSubmit, step: "fill" }, "hold"],
@@ -31,6 +36,14 @@ const cases: DialogCase[] = [
   ["holds a password request in Hebrew", { ...page, type: "prompt", message: "הזן את הסיסמה שלך" }, unapproved, "hold"],
   ["holds a verification code request in Hebrew",
     { ...page, type: "beforeunload", message: "הזן קוד אימות" }, unapproved, "hold"],
+  ["holds a Hebrew verification code request with the definite article",
+    { ...page, type: "confirm", message: "הזן את קוד האימות" }, approvedSubmit, "hold"],
+  ["holds a Hebrew security code request with the definite article",
+    { ...page, type: "confirm", message: "הזן את קוד האבטחה" }, approvedSubmit, "hold"],
+  ["holds a Hebrew password request in the construct form",
+    { ...page, type: "confirm", message: "הזן את סיסמת החשבון" }, approvedSubmit, "hold"],
+  ["holds a Hebrew password request with a possessive suffix",
+    { ...page, type: "confirm", message: "הזן את סיסמתך" }, approvedSubmit, "hold"],
   ["holds an unknown dialog type", { ...page, type: "unknown" }, approvedSubmit, "hold"],
   ["holds without a type", page, approvedSubmit, "hold"],
   ["holds without an origin", { type: "confirm", message: page.message }, approvedSubmit, "hold"],

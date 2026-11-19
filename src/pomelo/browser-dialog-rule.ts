@@ -22,7 +22,8 @@ export interface DialogDecision {
   promptText: null;
 }
 
-const CREDENTIAL_REQUEST = /\b(?:passwords?|passcodes?|(?:verification|security|one[\s-]+time)[\s-]+codes?|otp|(?:enter|provide|type)\s+(?:(?:the|your|a)\s+)?codes?)\b|סיסמ(?:ה|א|ות)|קוד[\s־-]+(?:אימות|אבטחה|חד[\s־-]+פעמי)/iu;
+const CREDENTIAL_REQUEST = /\b(?:passwords?|passcodes?|(?:verification|security|one[\s-]+time)[\s-]+codes?|otp|(?:enter|provide|type)\s+(?:(?:the|your|a)\s+)?codes?)\b/iu;
+const HEBREW_CREDENTIAL_REQUEST = /סיסמ(?:ה|א|ות|ת)|קוד[\s־-]+ה?(?:אימות|אבטחה|חד[\s־-]+פעמי)/u;
 
 /** The caller tracks acceptance for the current step before acting on another dialog. */
 export function decideDialog(
@@ -48,7 +49,9 @@ export function decideDialog(
     return decision("hold", "missing-dialog-fields");
   }
 
-  if (CREDENTIAL_REQUEST.test(message)) return decision("hold", "credential-request");
+  if (CREDENTIAL_REQUEST.test(message) || HEBREW_CREDENTIAL_REQUEST.test(message)) {
+    return decision("hold", "credential-request");
+  }
 
   switch (event.type) {
     case "alert":
@@ -58,9 +61,9 @@ export function decideDialog(
       return decision("dismiss", "prompt");
     case "confirm":
     case "beforeunload":
-      if (!context.approved) {
+      if (!context.approved || step === "other") {
         if (event.type === "beforeunload") return decision("dismiss", "stay-on-page");
-        return decision("hold", "step-not-approved");
+        return decision("hold", context.approved ? "step-not-eligible" : "step-not-approved");
       }
       if (context.acceptedDialog) return decision("hold", "dialog-already-accepted");
       return decision("accept", "step-approved");
