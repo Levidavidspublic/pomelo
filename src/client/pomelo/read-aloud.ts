@@ -56,26 +56,35 @@ function blocks(markdown: string): string {
 }
 
 function inline(text: string): string {
+  const codeSpans: string[] = [];
+  // Markdown replaces literal NULs, leaving these placeholders reserved for code spans.
   return text
+    .replace(/\0/g, "\uFFFD")
+    .replace(/(?<![\\\x60])(\x60+)(?!\x60)([\s\S]*?)(?<!\x60)\1(?!\x60)/g, (_span, _fence, code: string) => {
+      const index = codeSpans.push(code.replace(/\n/g, " ")) - 1;
+      return `\0${index}\0`;
+    })
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/!?\[([^\]\n]*)\]\((?:<[^>\n]*>|(?:\\.|[^\s()\\]|\([^()\n]*\))*)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?[ \t]*\)/g, "$1")
     .replace(/<(https?:\/\/[^<>\s]+)>/gi, "$1")
     .replace(/<br\s*\/?>/gi, " ")
     .replace(/<\/?[a-z][\w:-]*(?=\s|\/?>)(?:[^'"<>]|"[^"]*"|'[^']*')*>/gi, "")
     .replace(/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|(?<!\\)\$(?!\s)(?:\\.|[^\\$\n])+?(?<!\s)\$(?!\d)/g, " ")
-    .replace(/\x60+([^\x60]+?)\x60+/g, "$1")
     .replace(/(?<!\\)(\*{1,3})(?=\S)(.+?)(?<=\S)\1/g, "$2")
     .replace(/(?<!\\)\*(?=\S)(.+?)(?<=\S)\*/g, "$1")
     .replace(/(?<![\p{L}\p{N}\\])(_{1,3})(?=\S)(.+?)(?<=\S)\1(?![\p{L}\p{N}])/gu, "$2")
     .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1")
-    .replace(/\b(?:https?:\/\/|www\.)[^\s<>"'\x60]+/gi, (address) => {
+    .replace(/\b(?:https?:\/\/|www\.)[^\s<>"'\x60\0]+/gi, (address) => {
       const url = address.replace(/[.,!?;:)\]}]+$/, "");
-      const hostname = URL.parse(/^www\./i.test(url) ? "https://" + url : url)?.hostname;
-      return hostname ? hostname + address.slice(url.length) : address;
+      try {
+        const { hostname } = new URL(/^www\./i.test(url) ? "https://" + url : url);
+        return hostname + address.slice(url.length);
+      } catch {
+        return address;
+      }
     })
     .replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_\x60{|}~])/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\0(\d+)\0/g, (_placeholder, index: string) => codeSpans[Number(index)]!);
 }
 
 function chunk(text: string): Chunk {
@@ -88,7 +97,7 @@ export function speakable(markdown: string): readonly Chunk[] {
   const chunks: Chunk[] = [];
   for (const { segment } of sentences.segment(inline(blocks(markdown)))) {
     let text = "";
-    for (const word of segment.trim().split(" ")) {
+    for (const word of segment.trim().split(/\s+/)) {
       if (text && text.length + 1 + word.length > MAX_CHUNK_LENGTH) {
         chunks.push(chunk(text));
         text = "";

@@ -41,7 +41,10 @@ test("a table becomes one note counting the header and data rows", () => {
   assert.equal(spoken("Keep left | right."), "Keep left | right.");
 });
 
-test("links speak their label and bare web URLs speak their hostname", () => {
+test("links speak their label and bare web URLs speak their hostname", (t) => {
+  if (typeof URL.parse === "function") {
+    t.mock.method(URL, "parse", () => { throw new Error("URL.parse is unavailable"); });
+  }
   const markdown = 'Read [the **guide**](https://example.com/path_(draft) "A title"). Then see (https://example.org/docs?q=1#part).';
 
   assert.equal(spoken(markdown), "Read the guide. Then see (example.org).");
@@ -54,6 +57,12 @@ test("inline math and HTML tags are dropped while nearby prose stays", () => {
   assert.equal(spoken(markdown), "The result is ready. Compare with today.");
   assert.equal(spoken("Prices went from $5 to $10."), "Prices went from $5 to $10.");
   assert.equal(spoken("First<br>second."), "First second.");
+});
+
+test("inline code keeps literal HTML-like text and math symbols", () => {
+  const markdown = '**Use `Array<string>`** with [`$x$`](https://example.com). Keep `**literal**` as written.';
+
+  assert.equal(spoken(markdown), "Use Array<string> with $x$. Keep **literal** as written.");
 });
 
 test("empty or whitespace-only messages have no chunks", () => {
@@ -70,6 +79,22 @@ test("the verdict is the first chunk and longer sentences break between words", 
   assert.ok(chunks.length > 3);
   assert.ok(chunks.every(({ text }) => text.length <= 200 && text === text.trim()));
   assert.equal(chunks.map(({ text }) => text).join(" "), `Ready to ship. ${details} This is the last sentence.`);
+});
+
+test("an unpunctuated heading stays separate from the body", () => {
+  assert.deepEqual(speakable("# Ready to ship\n\nAll checks pass."), [
+    { text: "Ready to ship", lang: "en" },
+    { text: "All checks pass.", lang: "en" },
+  ]);
+});
+
+test("unpunctuated list items stay in separate chunks", () => {
+  assert.deepEqual(speakable("- Ready to ship\n- All checks pass\n- Review the summary. Save the report."), [
+    { text: "Ready to ship", lang: "en" },
+    { text: "All checks pass", lang: "en" },
+    { text: "Review the summary.", lang: "en" },
+    { text: "Save the report.", lang: "en" },
+  ]);
 });
 
 test("a single word over the chunk limit is replaced with a spoken note", () => {
