@@ -50,15 +50,18 @@ test("thread and subagent requests need nonempty text fields", () => {
   assertError(openThreadAsk({ title: "Release notes" }), /prompt/);
   assertError(spawnSubagentAsk({ purpose: "Review docs" }), /prompt/);
   assertError(openThreadAsk({ title: " \n ", prompt: "Draft the notes." }), /title/);
+  assertError(openThreadAsk({ title: "Release notes", prompt: false }), /prompt/);
   assertError(spawnSubagentAsk({ purpose: 123, prompt: "Check the examples." }), /purpose/);
+  assertError(spawnSubagentAsk({ purpose: "Review docs", prompt: " \n " }), /prompt/);
   assertError(spawnSubagentAsk({ purpose: "Review docs", prompt: "Check the examples.", tool: null }), /tool/);
+  assertError(spawnSubagentAsk({ purpose: "Review docs", prompt: "Check the examples.", tool: " " }), /tool/);
 });
 
 test("tag lists need one to eight nonempty text entries when supplied", () => {
   assertError(tagProjectAsk({}), /tags/);
   const eightTags = Array.from({ length: 8 }, (_, i) => `Tag ${i + 1}`);
   assert.deepEqual(tagProjectAsk({ tags: eightTags }), { tags: eightTags });
-  for (const tags of [[], [...eightTags, "Tag 9"], "Docs", ["Docs", 123], [" "]]) {
+  for (const tags of [[], [...eightTags, "Tag 9"], "Docs", ["Docs", 123], [" "], new Array(1)]) {
     assertError(tagProjectAsk({ tags }), /tags/);
     assertError(openThreadAsk({ title: "Release notes", prompt: "Draft the notes.", tags }), /tags/);
   }
@@ -78,4 +81,10 @@ test("the checkers accept text at the length limit and reject longer text", () =
   assertError(spawnSubagentAsk({ purpose, prompt: `${prompt}c` }), /prompt.*5000/);
   assertError(spawnSubagentAsk({ purpose, prompt, tool: `${tool}e` }), /tool.*32/);
   assertError(tagProjectAsk({ tags: [`${tag}d`] }), /tags.*32/);
+});
+
+test("the text limit counts Unicode characters like the input schema", () => {
+  const tag = "📚".repeat(32);
+  assert.deepEqual(tagProjectAsk({ tags: [tag] }), { tags: [tag] });
+  assertError(tagProjectAsk({ tags: [`${tag}📚`] }), /tags.*32/);
 });
