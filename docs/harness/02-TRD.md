@@ -66,7 +66,7 @@ Rebase rule (EXTRAPOLATED, KISS):
   - Export runs the same path in reverse.
 
 ### 3.4 Cloud browser (acts like a PC)
-- Reuse what's already on the VPS: the `cloud-browser` container (linuxserver/chromium) with CDP on 127.0.0.1:19222, and the `cloud-browser` CLI. (19 Nov config note)
+- Reuse the VPS `cloud-browser` container (linuxserver/chromium, CDP on 127.0.0.1:19222). (19 Nov config note)
 - Playwright connects over CDP. Profiles are encrypted at rest. Logins move PC → VPS only over the tailnet.
 - Remote viewing for Amit uses the existing tailnet-only link. The login gate is UNKNOWN.
 
