@@ -25,7 +25,7 @@ test("Pomelo round-trips JSON and lists its matching records in key order", asyn
   const value = { label: "Zebra", flags: [true, null, 3] };
 
   await store.set("tag:zebra", value);
-  for (let i = 0; i < 12; i++) await store.set(`job:${i}`, i);
+  for (let i = 0; i < 105; i++) await store.set(`job:${i}`, i);
   await store.set("tag:alpha", null);
   await store.appendLog("tag:history", { action: "saved" });
 
@@ -38,7 +38,7 @@ test("Pomelo round-trips JSON and lists its matching records in key order", asyn
   assert.equal(await store.get(fridayKey), null);
   assert.equal(await redis.get(fridayKey), '"Friday record"');
   const keys = (await redis.keys("*")).filter((key) => key !== fridayKey);
-  assert.equal(keys.length, 15);
+  assert.equal(keys.length, 108);
   assert.ok(keys.every((key) => key.startsWith("pomelo:")));
 });
 
