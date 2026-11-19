@@ -63,6 +63,40 @@ test("skips Friday files and exact allow-listed Pomelo paths", () => {
   ]);
 });
 
+test("matches provider names inside environment variables and identifiers", () => {
+  assert.deepEqual(neverGuard([{
+    path: serverPath,
+    added: [
+      { line: 1, text: `process.env.${router.toUpperCase()}_API_KEY` },
+      { line: 2, text: "createOpen" + "Router()" },
+      { line: 3, text: `const ${integration}_client = client;` },
+      { line: 4, text: "new Compo" + "sioToolSet()" },
+    ],
+  }]), [
+    { path: serverPath, line: 1, rule: router },
+    { path: serverPath, line: 2, rule: router },
+    { path: serverPath, line: 3, rule: integration },
+    { path: serverPath, line: 4, rule: integration },
+  ]);
+});
+
+test("matches prohibited hosts and account routes on subdomains", () => {
+  assert.deepEqual(neverGuard([{
+    path: clientPath,
+    added: [
+      { line: 1, text: `const login = "https://www.${accountHost}/login";` },
+      { line: 2, text: `const oauth = "https://accounts.${accountHost}/oauth/authorize";` },
+      { line: 3, text: `const auth = "https://accounts.${accountHost}/api/auth";` },
+      { line: 4, text: `const api = "https://gateway.${apiHost}/v1";` },
+    ],
+  }]), [
+    { path: clientPath, line: 1, rule: "claude-login" },
+    { path: clientPath, line: 2, rule: "claude-login" },
+    { path: clientPath, line: 3, rule: "claude-login" },
+    { path: clientPath, line: 4, rule: "openai-api" },
+  ]);
+});
+
 test("ignores clean lines, longer words, and lookalike hosts or routes", () => {
   assert.deepEqual(neverGuard([{
     path: serverPath,
@@ -72,6 +106,8 @@ test("ignores clean lines, longer words, and lookalike hosts or routes", () => {
       { line: 3, text: `const url = "https://${apiHost}.example.test";` },
       { line: 4, text: `const url = "https://${accountHost}/logins";` },
       { line: 5, text: `const url = "https://${accountHost}/chat";` },
+      { line: 6, text: `const url = "https://fake-${apiHost}/v1";` },
+      { line: 7, text: `const url = "https://www.fake-${accountHost}/login";` },
     ],
   }]), []);
 });

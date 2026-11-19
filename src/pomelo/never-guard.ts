@@ -1,9 +1,9 @@
 export const NEVER_RULES = [
-  { name: "openrouter", pattern: /\bopenrouter\b/i },
-  { name: "composio", pattern: /\bcomposio\b/i },
+  { name: "openrouter", pattern: /openrouter/i },
+  { name: "composio", pattern: /composio/i },
   { name: "n8n", pattern: /\bn8n\b/i },
-  { name: "openai-api", pattern: /(?<![\w.-])api\.openai\.com(?![\w-]|\.[\w-])/i },
-  { name: "claude-login", pattern: /(?<![\w.-])claude\.ai\/(?:login|oauth|api\/auth)(?![\w-])/i },
+  { name: "openai-api", pattern: /(?<![\w-])api\.openai\.com(?![\w-]|\.[\w-])/i },
+  { name: "claude-login", pattern: /(?<![\w-])claude\.ai\/(?:login|oauth|api\/auth)(?![\w-])/i },
 ] as const;
 
 type ChangedFile = {
