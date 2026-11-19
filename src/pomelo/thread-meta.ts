@@ -9,7 +9,7 @@ export interface ThreadRecord {
 }
 
 const THREAD_PREFIX = "thread:";
-const pendingWrites = new Map<string, Promise<void>>();
+const pendingWrites = new Map<string, Promise<unknown>>();
 
 function validSid(sid: string): boolean {
   return typeof sid === "string" && sid.length > 0 && !sid.includes(":");
@@ -32,13 +32,13 @@ function isThreadRecord(value: unknown, sid: string): value is ThreadRecord {
     && (record.parentThreadId === undefined || typeof record.parentThreadId === "string");
 }
 
-async function writeInOrder(key: string, write: () => Promise<void>): Promise<void> {
+async function writeInOrder<T>(key: string, write: () => Promise<T>): Promise<T> {
   // Store handles can share a backing store. Serialize the read-modify-write by key in this process.
   const previous = pendingWrites.get(key) ?? Promise.resolve();
   const next = previous.then(write, write);
   pendingWrites.set(key, next);
   try {
-    await next;
+    return await next;
   } finally {
     if (pendingWrites.get(key) === next) pendingWrites.delete(key);
   }
@@ -81,6 +81,21 @@ export async function addProjectTags(
       projectTags: [...new Set([...record.projectTags, ...slugs])],
       lastActivityAt: Math.max(record.lastActivityAt, now),
     });
+  });
+}
+
+/** Replace the tags and return the previous list. Run any prerequisite writes in the same queue slot. */
+export async function setProjectTags(
+  store: PomeloStore, sid: string, slugs: readonly string[], beforeWrite?: () => Promise<void>,
+): Promise<string[]> {
+  const key = threadKey(sid);
+  const projectTags = [...slugs];
+  return writeInOrder(key, async () => {
+    // A legacy session with no metadata has no known activity timestamp.
+    const record = await getThreadMeta(store, sid) ?? newThreadMeta(sid, 0);
+    await beforeWrite?.();
+    await writeRecord(store, key, { ...record, projectTags });
+    return record.projectTags;
   });
 }
 
