@@ -26,7 +26,8 @@ interface ImportWizardInput {
   sites: readonly string[];
   targetProfileId?: string | null;
   profiles: readonly { id: string; location: "local" | "cloud" }[];
-  run?: Partial<Pick<ImportRun, "endedAt" | "targetProfileId">> & {
+  run?: Partial<Pick<ImportRun, "targetProfileId">> & {
+    endedAt?: ImportRun["endedAt"] | null;
     sites: readonly ReceiptSite[];
   } | null;
 }
@@ -35,14 +36,14 @@ function isImportResult(result: unknown): result is ImportResult {
   return typeof result === "string" && Object.hasOwn(resultDisplay, result);
 }
 
-function importRows(sites: readonly ReceiptSite[]): WizardRow[] {
-  const rows = sites.map(({ site, result: rawResult }) => {
+function importRows(pickedSites: readonly string[], receiptSites: readonly ReceiptSite[]): WizardRow[] {
+  const resultsBySite = new Map(receiptSites.map(({ site, result }) => [site, result]));
+  const rows = pickedSites.map((pickedSite) => {
+    const site = typeof pickedSite === "string" ? pickedSite : "Unknown site";
+    // The receipt stores hostnames in lowercase without a trailing dot.
+    const rawResult = resultsBySite.get(site.replace(/\.$/, "").toLowerCase());
     const result = isImportResult(rawResult) ? rawResult : "skipped";
-    return {
-      site: typeof site === "string" ? site : "Unknown site",
-      result,
-      ...resultDisplay[result],
-    };
+    return { site, result, ...resultDisplay[result] };
   });
   return rows.sort((a, b) => Number(a.result === "imported") - Number(b.result === "imported"));
 }
@@ -72,12 +73,12 @@ export function importWizard({ extensionPaired, sourceProfile, sites, targetProf
 
   if (run) {
     nextLabel = null;
-    if (run.endedAt === undefined) {
+    if (run.endedAt == null) {
       step = "running";
       headline = "Importing sites…";
     } else {
       step = "results";
-      rows = importRows(run.sites);
+      rows = importRows(sites, run.sites);
       headline = resultsHeadline(rows);
     }
   } else if (!extensionPaired) {
@@ -110,6 +111,6 @@ export function importWizard({ extensionPaired, sourceProfile, sites, targetProf
     blockedReason,
     headline,
     rows,
-    vps: target?.location === "cloud",
+    ...(target?.location === "cloud" ? { vps: true as const } : {}),
   };
 }

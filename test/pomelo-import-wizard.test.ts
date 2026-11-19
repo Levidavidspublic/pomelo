@@ -56,12 +56,14 @@ test("enables the import once the three setup steps are complete", () => {
 
 test("an active import disables the next action and waits to show results", () => {
   const run: ImportRun = { ...started, sites: [{ site: ready.sites[0], result: "imported" }] };
-  const model = importWizard({ ...ready, run });
-  assert.equal(model.step, "running");
-  assert.equal(model.canNext, false);
-  assert.equal(model.nextLabel, null);
-  assert.equal(model.headline, "Importing sites…");
-  assert.deepEqual(model.rows, []);
+  for (const receipt of [run, { ...run, endedAt: null }]) {
+    const model = importWizard({ ...ready, run: receipt });
+    assert.equal(model.step, "running");
+    assert.equal(model.canNext, false);
+    assert.equal(model.nextLabel, null);
+    assert.equal(model.headline, "Importing sites…");
+    assert.deepEqual(model.rows, []);
+  }
 });
 
 test("reports all sites imported only after every result is imported", () => {
@@ -130,16 +132,59 @@ test("counts unfamiliar results as skipped and gives them a warning label", () =
   })));
 });
 
-test("an empty finished receipt does not claim a successful import", () => {
+test("a finished receipt counts missing picked sites as skipped", () => {
+  const sites = [...ready.sites, "three.example.test", "four.example.test", "five.example.test"];
+  const run: ImportRun = {
+    ...started,
+    sites: ready.sites.map((site) => ({ site, result: "imported" })),
+    endedAt: 2_000,
+  };
+  const model = importWizard({ ...ready, sites, run });
+  assert.equal(model.step, "results");
+  assert.equal(model.headline, "2 of 5 imported · 3 skipped");
+  assert.deepEqual(model.rows, [
+    ...sites.slice(2).map((site) => ({ site, result: "skipped", label: "Skipped", tone: "warn" })),
+    ...ready.sites.map((site) => ({ site, result: "imported", label: "Imported", tone: "good" })),
+  ]);
+});
+
+test("matches normalized receipt hostnames and excludes results for unpicked sites", () => {
+  const sites = ["ONE.EXAMPLE.TEST.", ready.sites[1]];
+  const run: ImportRun = {
+    ...started,
+    sites: [
+      { site: ready.sites[0], result: "imported" },
+      { site: "unpicked.example.test", result: "imported" },
+    ],
+    endedAt: 2_000,
+  };
+  const model = importWizard({ ...ready, sites, run });
+  assert.equal(model.headline, "1 of 2 imported · 1 skipped");
+  assert.deepEqual(model.rows.map(({ site, result }) => [site, result]), [
+    [sites[1], "skipped"],
+    [sites[0], "imported"],
+  ]);
+});
+
+test("an empty finished receipt counts every picked site as skipped", () => {
   const run: ImportRun = { ...started, startedAt: 0, endedAt: 0 };
   const model = importWizard({ ...ready, run });
+  assert.equal(model.step, "results");
+  assert.equal(model.headline, "0 of 2 imported · 2 skipped");
+  assert.deepEqual(model.rows, ready.sites.map((site) => ({
+    site, result: "skipped", label: "Skipped", tone: "warn",
+  })));
+});
+
+test("a finished import without any picked sites shows an empty state", () => {
+  const model = importWizard({ ...ready, sites: [], run: { ...started, endedAt: 2_000 } });
   assert.equal(model.step, "results");
   assert.equal(model.headline, "No site results available");
   assert.deepEqual(model.rows, []);
 });
 
 test("a cloud target sets the VPS badge for the selection and the active run", () => {
-  assert.equal(importWizard(ready).vps, false);
+  assert.equal(Object.hasOwn(importWizard(ready), "vps"), false);
   assert.equal(importWizard({ ...ready, targetProfileId: "cloud" }).vps, true);
   assert.equal(importWizard({ ...ready, run: { ...started, targetProfileId: "cloud" } }).vps, true);
 });
