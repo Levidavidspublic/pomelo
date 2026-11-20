@@ -56,7 +56,7 @@ export function applyLaneEvent(state: LaneState, event: LaneEvent): LaneState {
     if (previous.status !== "running" && previous.status !== "waiting") return state;
   }
 
-  const status = type === "lane-step" && previous ? previous.status : STATUS_BY_EVENT[type];
+  const status = STATUS_BY_EVENT[type];
   const lastStepAt = type === "lane-step" ? at : previous?.lastStepAt;
   const purpose = event.purpose === undefined ? previous?.purpose : capPurpose(event.purpose);
   if (previous?.lastEventAt === at && previous.status === status

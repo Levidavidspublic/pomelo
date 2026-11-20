@@ -44,11 +44,17 @@ test("waiting keeps the row and clears the running badge count", () => {
   assert.equal(state.get(threadId)?.lanes.size, 1);
   assert.equal(state.get(threadId)?.lanes.get(laneId)?.status, "waiting");
   assert.equal(state.get(threadId)?.lanes.get(laneId)?.lastStepAt, 20);
+});
 
-  const withStep = applyLaneEvent(state, { ...step, at: 35 });
-  assert.equal(runningCount(withStep, threadId), 0);
-  assert.equal(withStep.get(threadId)?.lanes.get(laneId)?.status, "waiting");
-  assert.equal(withStep.get(threadId)?.lanes.get(laneId)?.lastStepAt, 35);
+test("a step resumes a waiting lane and restores the running badge count", () => {
+  const working = applyLaneEvent(applyLaneEvent(emptyLaneState(), started), step);
+  const state = applyLaneEvent(working, waiting);
+  const resumed = applyLaneEvent(state, { ...step, at: 35 });
+
+  assert.equal(runningCount(resumed, threadId), 1);
+  assert.equal(resumed.get(threadId)?.lanes.size, 1);
+  assert.equal(resumed.get(threadId)?.lanes.get(laneId)?.status, "running");
+  assert.equal(resumed.get(threadId)?.lanes.get(laneId)?.lastStepAt, 35);
 });
 
 test("each terminal status is final, including done after waiting", () => {
@@ -141,6 +147,14 @@ test("updating a frozen state and event leaves the inputs intact", () => {
   assert.notEqual(next, state);
   assert.notEqual(next.get(threadId)?.lanes, thread.lanes);
   assert.equal(next.get(threadId)?.lanes.get(laneId)?.status, "waiting");
+
+  const withLane = applyLaneEvent(state, { ...started, laneId: "lane-b" });
+  assert.equal(withLane.get(threadId)?.lanes.size, 2);
+  const withThread = applyLaneEvent(state, { ...started, threadId: "thread-b" });
+  assert.equal(withThread.size, 2);
+
+  assert.equal(state.size, 1);
+  assert.equal(thread.lanes.size, 1);
   assert.equal(runningCount(state, threadId), 1);
   assert.equal(state.get(threadId), thread);
   assert.equal(thread.lanes.get(laneId), row);
