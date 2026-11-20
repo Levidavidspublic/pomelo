@@ -42,6 +42,18 @@ test("detects paths rooted at the user's home, including helpers and other overr
   }
 });
 
+test("detects paths rooted at a home parameter in the function that declares it", () => {
+  for (const source of [
+    'async function folders(home: string): Promise<string[]> { return path.join(home, ".friday", "worktrees"); }',
+    'function guarded(file: string, home: string): string | null {\n' +
+      '  const h = home.replace(/\\/$/, "");\n' +
+      '  if (under(file, `${h}/.friday`)) return "Friday data";\n' +
+      '  return null;\n}',
+  ]) {
+    assert.equal(hasDirectFridayHomePath(source), true, source);
+  }
+});
+
 test("ignores configured fallbacks, project folders and references in comments and messages", () => {
   for (const source of [
     'path.join(process.env.FRIDAY_HOME || path.join(os.homedir(), ".friday"), "shots")',
@@ -50,6 +62,9 @@ test("ignores configured fallbacks, project folders and references in comments a
     'path.join(repoRoot, ".friday", "state.json")',
     'path.join(homedir(), "repos", ".friday")',
     'const repoRoot = homedir() + "/repo"; path.join(repoRoot, ".friday");',
+    'function one() { const home = homedir(); }\nfunction two() { const home = repoRoot; return join(home, ".friday"); }',
+    'function one(home: string) { const h = home.replace(/\\/$/, ""); }\nfunction two(repoRoot: string) { const h = repoRoot; return `${h}/.friday`; }',
+    'function folders(home: string) { return process.env.FRIDAY_HOME ?? join(home, ".friday"); }',
     '`${homedir()}/repos/.friday`',
     'path.join(homedir(), ".friday-linked")',
     '// join(homedir(), ".friday");\n/* `${homedir()}/.friday` */',
