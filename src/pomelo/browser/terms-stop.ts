@@ -84,13 +84,15 @@ function numberedControls(items: readonly string[]): { kind: string; label: stri
 function contextsFor(control: AgreementControl, label: string, title: string, lines: readonly string[]): string[] {
   if (control.nearbyText !== undefined) return [control.nearbyText.split(/\r?\n/).map(normalize).join("\n")];
 
+  const windowSize = 3;
   const neighbors = lines.flatMap((line, index) => line === label
-    ? [[index === 0 ? title : lines[index - 1], lines[index + 1]].filter(Boolean).join("\n")]
+    ? [[title, ...lines.slice(Math.max(0, index - windowSize), index),
+      ...lines.slice(index + 1, index + 1 + windowSize)].filter(Boolean).join("\n")]
     : []);
   if (neighbors.length) return neighbors;
-  // A flat read can list controls separately from a short prompt and its heading.
-  if (lines.length <= 2) return [[title, ...lines].filter(Boolean).join("\n")];
-  return [""];
+  // When the flat read lists a control separately, its position is unknown.
+  // Use the title and visible text after the caller has filtered out link-only lines.
+  return [[title, ...lines].filter(Boolean).join("\n")];
 }
 
 function checkboxSignal(label: string): string | undefined {

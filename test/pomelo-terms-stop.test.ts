@@ -41,6 +41,26 @@ test("holds an Accept and continue button beneath updated terms", () => {
   }).action, "hold");
 });
 
+test("holds a blocking button when the title names updated terms", () => {
+  const result = termsStop({
+    title: "Updated terms",
+    text: "Welcome back\nPlease review the changes.\nAccept and continue",
+    buttons: [{ label: "Accept and continue" }],
+  });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.signals, ["Accept and continue"]);
+});
+
+test("holds a blocking button reported separately from a legal heading and two paragraphs", () => {
+  const result = termsStop({
+    title: "Account notice",
+    text: "Updated Terms of Service\nPlease review the changes below.\nThese changes take effect next month.",
+    buttons: [{ label: "Accept and continue" }],
+  });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.signals, ["Accept and continue"]);
+});
+
 test("holds the Hebrew agreement buttons beside Hebrew terms", () => {
   for (const label of ["אני מסכים", "אני מאשר"]) {
     const result = termsStop({
@@ -67,6 +87,10 @@ test("distinguishes continuing past a legal prompt from ordinary navigation", ()
   }).action, "hold");
   assert.equal(termsStop({
     text: "We have updated our terms\nWelcome to the survey\nAgree",
+    buttons: [{ label: "Agree" }],
+  }).action, "hold");
+  assert.equal(termsStop({
+    text: "Survey\nChoose your response\nHow useful was this guide?",
     buttons: [{ label: "Agree" }],
   }).action, "go");
   assert.equal(termsStop({
