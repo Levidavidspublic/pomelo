@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../app.js";
+import { applyPomeloDefaults } from "../pomelo/home.js";
 import { localKV } from "./kv.js";
 import { NO_MODELS } from "./no-models.js";
 import { outsideToken, writeOutsideShim } from "./outside-mcp.js";
@@ -130,6 +131,7 @@ function fridayVersion(): string {
 }
 
 export async function startLocal(o: { home?: string; port?: number; /** A link from another computer's Settings › Your computers: this one is paired with it, once (add-computer.ts). */ join?: string; /** Removed or turned away there for good: what to do (a service exits, so it isn't started again). */ onGone?: () => void; /** Whether the person is using this computer now (the desktop app): their phone isn't notified then. */ atComputer?: () => boolean } = {}): Promise<Started> {
+  applyPomeloDefaults(process.env, os.homedir());
   // The local client, built from its own entry (client-build.ts), whatever the environment says.
   process.env.FRIDAY_EDITION = "local";
   const home = path.resolve(o.home || process.env.FRIDAY_HOME || path.join(os.homedir(), ".friday"));
