@@ -28,12 +28,13 @@ test("renders a focusable diagram named by the card label with three plain-text 
   const title = "Review flow";
   const html = render({ source: flowchart, title, drawn });
   const { label } = cardLabel({ kind: "diagram", title });
+  assert.match(html, /<figure\b[^>]*style="background-color:var\(--card\);color:var\(--ink\);border-color:var\(--border\)"/);
   assert.ok(imageTag(html).includes(`aria-label="${label}"`));
   assert.match(imageTag(html), /\btabindex="0"/i);
   assert.match(imageTag(html), /\bdir="ltr"/);
   assert.doesNotMatch(html, /\bautofocus\b|<pre\b/i);
   assert.match(html, /<span>Drawing fixture<\/span>/);
-  assert.deepEqual(Array.from(html.matchAll(/<button\b[^>]*>([^<]+)<\/button>/g), ([, text]) => text), [
+  assert.deepEqual(Array.from(html.matchAll(/<button\b[^>]*style="border-color:var\(--border\)"[^>]*>([^<]+)<\/button>/g), ([, text]) => text), [
     "Zoom in", "Zoom out", "Fit",
   ]);
   assert.equal(html.match(/<button\b/g)?.length, 3);
@@ -61,7 +62,7 @@ test("shows the source check's reason and fallback text for a click callback", (
 
 test("shows the original source and a reason while a safe diagram has no drawing", () => {
   const html = render({ source: flowchart });
-  assert.match(html, /The diagram has not been drawn yet\./);
+  assert.match(html, /<p\b[^>]*style="color:var\(--ink-2\)"[^>]*>The diagram has not been drawn yet\.<\/p>/);
   assert.equal(html.match(/<pre\b[^>]*\bdir="ltr"[^>]*>([\s\S]*?)<\/pre>/)?.[1], flowchart.replaceAll(">", "&gt;"));
   assert.doesNotMatch(html, /role="img"|<button\b/);
 });

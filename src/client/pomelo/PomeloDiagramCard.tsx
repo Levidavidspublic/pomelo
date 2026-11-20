@@ -44,12 +44,12 @@ export function PomeloDiagramCard({ source, title, drawn, frame, diagram, reduce
   return (
     <figure
       className="m-0 min-w-0 rounded-xl border p-3"
-      style={{ backgroundColor: "var(--pomelo-surface)", color: "var(--pomelo-text)", borderColor: "var(--pomelo-divider)" }}
+      style={{ backgroundColor: "var(--card)", color: "var(--ink)", borderColor: "var(--border)" }}
     >
       {title && <figcaption dir="auto" className="mb-2 font-medium">{title}</figcaption>}
       {!check.ok || drawn == null || typeof drawn === "boolean" ? (
         <>
-          <p dir="ltr" className="mb-2 text-sm" style={{ color: "var(--pomelo-text-secondary)" }}>
+          <p dir="ltr" className="mb-2 text-sm" style={{ color: "var(--ink-2)" }}>
             {check.ok ? "The diagram has not been drawn yet." : check.reason}
           </p>
           <pre dir="ltr" tabIndex={0} className="m-0 overflow-x-auto whitespace-pre text-left">{check.ok ? check.source : check.fallbackText}</pre>
@@ -77,7 +77,7 @@ export function PomeloDiagramCard({ source, title, drawn, frame, diagram, reduce
                 key={type}
                 type="button"
                 className="min-h-9 rounded-lg border px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-2"
-                style={{ borderColor: "var(--pomelo-divider)" }}
+                style={{ borderColor: "var(--border)" }}
                 onClick={() => dispatch({ type })}
               >
                 {label}
