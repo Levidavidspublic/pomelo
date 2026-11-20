@@ -113,10 +113,67 @@ test("ignores comments and literal text while checking template interpolations",
       { line: 4, text: '*/ const label = "process.env.IN_STRING";' },
       { line: 5, text: "const template = `process.env.IN_TEXT ${process.env.IN_EXPRESSION}`;" },
       { line: 6, text: "const pattern = /process.env.IN_REGEX/;" },
-      { line: 7, text: "const config = local.process.env.OTHER_SETTING;" },
     ],
   }]).hits, [
     { path: serverPath, line: 5, name: "IN_EXPRESSION", reason: "not-allowed" },
+  ]);
+});
+
+test("checks qualified process receivers and bracket access", () => {
+  assert.deepEqual(findEnvReads([{
+    path: serverPath,
+    added: [
+      { line: 1, text: "const direct = globalThis.process.env.SAMPLE_SETTING;" },
+      { line: 2, text: 'const computed = globalThis["process"]?.["env"]?.["EXTRA_SETTING"];' },
+      { line: 3, text: "const config = local.process.env.OTHER_SETTING;" },
+      { line: 4, text: "const mode = globalThis.process.env.NODE_ENV;" },
+      { line: 5, text: "Object.keys(globalThis.process.env);" },
+      { line: 6, text: 'const nested = ((globalThis.process).env)?.["NESTED_SETTING"];' },
+    ],
+  }]).hits, [
+    { path: serverPath, line: 1, name: "SAMPLE_SETTING", reason: "not-allowed" },
+    { path: serverPath, line: 2, name: "EXTRA_SETTING", reason: "not-allowed" },
+    { path: serverPath, line: 3, name: "OTHER_SETTING", reason: "not-allowed" },
+    { path: serverPath, line: 5, name: "*", reason: "whole-object" },
+    { path: serverPath, line: 6, name: "NESTED_SETTING", reason: "not-allowed" },
+  ]);
+});
+
+test("reports environment object bindings from process destructuring and named imports", () => {
+  assert.deepEqual(findEnvReads([{
+    path: serverPath,
+    added: [
+      { line: 1, text: "const { env } = process;" },
+      { line: 2, text: "const { cwd, env: environment } = (globalThis.process);" },
+      { line: 3, text: 'import { env as importedEnv, cwd as importedCwd } from "node:process";' },
+      { line: 4, text: "import {" },
+      { line: 5, text: "  env as legacyEnv," },
+      { line: 6, text: '} from "process";' },
+      { line: 7, text: 'import { env as unrelated } from "./settings.js";' },
+      { line: 8, text: "const { cwd: currentDirectory } = process;" },
+      { line: 9, text: "const { env: localEnv } = unrelated;" },
+    ],
+  }], { allowedNames: ["env", "*"] }).hits, [
+    { path: serverPath, line: 1, name: "*", reason: "whole-object" },
+    { path: serverPath, line: 2, name: "*", reason: "whole-object" },
+    { path: serverPath, line: 3, name: "*", reason: "whole-object" },
+    { path: serverPath, line: 5, name: "*", reason: "whole-object" },
+  ]);
+});
+
+test("checks nested expressions while ignoring regex and JSX text", () => {
+  assert.deepEqual(findEnvReads([{
+    path: clientPath,
+    added: [
+      { line: 1, text: 'const view = <><span title="process.env.IN_ATTRIBUTE">process.env.IN_TEXT</span>' },
+      { line: 2, text: "  {ready ? <span>{`label ${`${process.env.IN_NESTED_TEMPLATE}`}`}</span> : null}</>;" },
+      { line: 3, text: "if (ready) /[process.env.IN_REGEX/]/.test(label);" },
+      { line: 4, text: "const ratio = size / process.env.DIVISOR;" },
+      { line: 5, text: "const mode = ((process.env as Record<string, string>))?.[`NODE_ENV`];" },
+    ],
+  }]).hits, [
+    { path: clientPath, line: 2, name: "IN_NESTED_TEMPLATE", reason: "not-allowed" },
+    { path: clientPath, line: 4, name: "DIVISOR", reason: "not-allowed" },
   ]);
 });
 
@@ -133,6 +190,19 @@ test("checks contiguous multiline expressions without joining across missing lin
     { path: serverPath, line: 4, name: "SAMPLE_SETTING", reason: "not-allowed" },
     { path: serverPath, line: 10, name: "*", reason: "whole-object" },
     { path: serverPath, line: 20, name: "EXTRA_SETTING", reason: "not-allowed" },
+  ]);
+});
+
+test("reports an unknown name when an added bracket read is incomplete", () => {
+  assert.deepEqual(findEnvReads([{
+    path: serverPath,
+    added: [
+      { line: 3, text: "const value = process.env[" },
+      { line: 12, text: "const next = process.env.SAMPLE_SETTING;" },
+    ],
+  }]).hits, [
+    { path: serverPath, line: 3, name: "*", reason: "dynamic-name" },
+    { path: serverPath, line: 12, name: "SAMPLE_SETTING", reason: "not-allowed" },
   ]);
 });
 
