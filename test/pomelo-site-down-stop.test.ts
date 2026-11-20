@@ -43,6 +43,7 @@ test("recognizes outage wording in a successful response's title or masked text"
     { ...normal, title: "האתר בתחזוקה", maskedText: "" },
     { ...normal, title: "503 Service Unavailable | Example" },
     { ...normal, maskedText: "Example site\nInternal server error\nPlease check back later." },
+    { ...normal, maskedText: "Temporarily unavailable. Please check back later." },
     { ...normal, maskedText: "This site is temporarily unavailable. Please check back later." },
     { ...normal, maskedText: "Sorry, we’re down for scheduled maintenance." },
   ]) {
@@ -64,10 +65,20 @@ test("ordinary pages can mention maintenance or quote error wording", () => {
   }
 });
 
+test("a troubleshooting article with an error phrase in its title can proceed", () => {
+  assert.equal(siteDownStop({ ...normal, title: "Server error: how to fix it" }).verdict, "go");
+});
+
+test("a search result with a bare not-found line can proceed", () => {
+  const maskedText = "Search results\nNot found.\nTry a different search.";
+  assert.equal(siteDownStop({ ...normal, maskedText }).verdict, "go");
+});
+
 test("a not-found page holds without a retry", () => {
   for (const page of [
     { ...outage, status: 404, retryAfterSeconds: 30 },
     { ...normal, title: "404 Not Found" },
+    { ...normal, maskedText: "Page not found." },
   ]) {
     assert.deepEqual(siteDownStop(page), { verdict: "hold", waitSeconds: 0, reason: "not-found" });
   }
@@ -82,12 +93,26 @@ test("uses a positive Retry-After hint and caps the wait at one minute", () => {
   }
 });
 
-test("fill and import lead to an immediate hold", () => {
+test("healthy pages can proceed after a fill or import", () => {
   for (const lastStepKind of ["fill", "import"]) {
-    for (const page of [normal, outage]) {
+    assert.equal(siteDownStop({ ...normal, lastStepKind }).verdict, "go");
+  }
+});
+
+test("fill and import turn a retryable outage into an immediate hold", () => {
+  for (const lastStepKind of ["fill", "import"]) {
+    for (const page of [outage, { ...normal, title: "Down for maintenance" }]) {
       assert.deepEqual(siteDownStop({ ...page, lastStepKind }), {
         verdict: "hold", waitSeconds: 0, reason: "after-fill",
       });
+    }
+  }
+});
+
+test("fill and import preserve the reason for a page that already holds", () => {
+  for (const lastStepKind of ["fill", "import"]) {
+    for (const page of [{ ...normal, status: 404 }, { ...normal, maskedText: null }, { ...outage, triesSoFar: 4 }]) {
+      assert.deepEqual(siteDownStop({ ...page, lastStepKind }), siteDownStop(page));
     }
   }
 });

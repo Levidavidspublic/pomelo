@@ -20,13 +20,13 @@ const FIRST_WAIT_SECONDS = 5;
 const MAX_WAIT_SECONDS = 60;
 
 const OUTAGE_HEADINGS = [
-  /^(?:(?:http |error )?5\d\d[ :–—-]+)?(?:down for (?:scheduled )?maintenance|under (?:scheduled )?maintenance|(?:service )?temporarily unavailable|service unavailable|(?:internal )?server error|bad gateway|gateway time[- ]?out)(?=$| ?[.!…:|]| [–—-] )/i,
-  /^(?:(?:the|this|our) )?(?:site|website|server|service) (?:is )?(?:currently )?(?:down(?: for (?:scheduled )?maintenance)?|(?:under|undergoing) (?:scheduled )?maintenance|temporarily unavailable)(?=$| ?[.!…:|]| [–—-] )/i,
-  /^(?:sorry, )?(?:we are|we['’]re) (?:currently )?(?:down for|undergoing|performing) (?:scheduled )?maintenance(?=$| ?[.!…:|]| [–—-] )/i,
-  /^האתר (?:בתחזוקה|מושבת|אינו זמין(?: זמנית)?)(?=$| ?[.!…:|]| [–—-] )/u,
+  /^(?:(?:http |error )?5\d\d[ :–—-]+)?(?:down for (?:scheduled )?maintenance|under (?:scheduled )?maintenance|(?:service )?temporarily unavailable|service unavailable|(?:internal )?server error|bad gateway|gateway time[- ]?out)(?=$|[.!…](?:$| please )| \| )/i,
+  /^(?:(?:the|this|our) )?(?:site|website|server|service) (?:is )?(?:currently )?(?:down(?: for (?:scheduled )?maintenance)?|(?:under|undergoing) (?:scheduled )?maintenance|temporarily unavailable)(?=$|[.!…](?:$| )| \| )/i,
+  /^(?:sorry, )?(?:we are|we['’]re) (?:currently )?(?:down for|undergoing|performing) (?:scheduled )?maintenance(?=$|[.!…](?:$| )| \| )/i,
+  /^האתר (?:בתחזוקה|מושבת|אינו זמין(?: זמנית)?)(?=$|[.!…](?:$| )| \| )/u,
   /^(?:http|error) 5\d\d[.!]?$/i,
 ];
-const NOT_FOUND_HEADING = /^(?:404(?: (?:error|not found))?|(?:page )?not found)(?=$| ?[.!…:|]| [–—-] )/i;
+const NOT_FOUND_HEADING = /^(?:404 (?:error|(?:page )?not found)|page not found)[.!…]?(?: \| .+)?$/i;
 
 function hold(reason: string): SiteDownResult {
   return { verdict: "hold", waitSeconds: 0, reason };
@@ -36,7 +36,6 @@ function hold(reason: string): SiteDownResult {
 export function siteDownStop(facts: SiteDownFacts): SiteDownResult {
   const { status, title, maskedText, retryAfterSeconds, triesSoFar, lastStepKind, maxTries = DEFAULT_MAX_TRIES } = facts;
 
-  if (lastStepKind === "fill" || lastStepKind === "import") return hold("after-fill");
   if (status === 404) return hold("not-found");
   if (status != null && (!Number.isInteger(status) || status < 100 || status > 599)) {
     return hold("The load status is invalid. Amit can review the job.");
@@ -48,7 +47,7 @@ export function siteDownStop(facts: SiteDownFacts): SiteDownResult {
     .map((line) => line.trim().replace(/\s+/g, " "));
   const serverError = status != null && status >= 500;
 
-  if (!serverError && lines.some((line) => NOT_FOUND_HEADING.test(line))) return hold("not-found");
+  if (!serverError && (lines[0] === "404" || lines.some((line) => NOT_FOUND_HEADING.test(line)))) return hold("not-found");
   if (status != null && status >= 400 && !serverError) return hold("The page returned an HTTP error.");
 
   const outageHeading = lines.some((line) => OUTAGE_HEADINGS.some((pattern) => pattern.test(line)));
@@ -60,6 +59,7 @@ export function siteDownStop(facts: SiteDownFacts): SiteDownResult {
   }
   const currentTry = Math.max(1, triesSoFar);
   if (currentTry > maxTries) return hold("The site is still unavailable after the retry limit. Amit can review the job.");
+  if (lastStepKind === "fill" || lastStepKind === "import") return hold("after-fill");
 
   const backoff = FIRST_WAIT_SECONDS * 2 ** (currentTry - 1);
   const delay = typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
