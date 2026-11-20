@@ -31,6 +31,7 @@ const BILLING_LABEL = /\bbilling address\b|כתובת (?:החיוב|לחיוב|�
 const BILLING_PROMPT = /^(?:(?:enter|provide|select|choose) (?:(?:a|the|your) )?billing address\b|(?:הזן|הזיני|הזינו|בחר|בחרי|בחרו) (?:את )?כתובת (?:החיוב|לחיוב)(?!\p{L}))/u;
 const SAVED_CARDS = /^(?:saved (?:credit |payment )?cards?|(?:ה)?כרטיס(?:ים)? (?:ה)?שמור(?:ים)?)$/u;
 const SAVED_CARD_PROMPT = /^(?:(?:choose|pick|select|use|pay with) (?:(?:a|the|your) )?saved (?:credit |payment )?cards?\b|(?:בחר(?:ו|י)?|השתמש(?:ו|י)?|שלם|שלמו) (?:את |ב|עם )?(?:ה)?כרטיס(?:ים)? (?:ה)?שמור(?:ים)?(?!\p{L}))/u;
+const SAVED_CARD_ENDING = /^(?:(?:(?:credit|debit) )?card ending (?:in|with)|ה?כרטיס(?: אשראי)? (?:ש|ה)?מסתיים ב)[ :־-]*(?:[•●*x×][•●*x× ]*(?:\d{4})?|\d{4})(?=$|[ .,(])/u;
 const PAY_BUTTON = /^(?:pay(?: now)?|place (?:your |the )?order|buy now|confirm (?:your |the )?purchase|לתשלום(?: עכשיו)?|(?:שלם|שלמו)(?: עכשיו)?|בצע(?:ו|י)? (?:הזמנה|את ההזמנה)|קנה עכשיו|קנו עכשיו|רכוש עכשיו|אשר(?:ו|י)? רכישה)(?:$|(?=\s*[:–—$€£₪\d]))/u;
 const ORDER_TOTAL = /^(?:(?:your )?(?:order total|grand total|purchase total|total due|total to pay|amount due)\b|(?:סך הכל|סך הכול|סך (?:ההזמנה|לתשלום)|סכום (?:ההזמנה|לתשלום)|סה["״']?כ)(?!\p{L})|total\s*:?\s*(?:[$€£₪]\s*\d|\d))/u;
 const NUMBERED_CONTROL = /^\[\d+\]\s+(\S+)\s+("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[\da-fA-F]{4}))*")(?=$| [→=] )/;
@@ -76,11 +77,11 @@ function numberedControls(items: readonly string[]): { kind: string; label: stri
 }
 
 function totalNearButton(button: CheckoutButton, label: string, lines: readonly string[]): boolean {
-  if (button.nearbyText !== undefined) return normalizedLines(button.nearbyText).some((line) => ORDER_TOTAL.test(line));
+  if (normalizedLines(button.nearbyText ?? "").some((line) => ORDER_TOTAL.test(line))) return true;
 
   const positions = lines.flatMap((line, index) => line === label ? [index] : []);
-  // A short read can omit the label from its text while still showing the same summary.
-  if (positions.length === 0) return lines.length <= TOTAL_LINE_RADIUS && lines.some((line) => ORDER_TOTAL.test(line));
+  // Without a standalone label, the flat read cannot locate the button relative to the total.
+  if (positions.length === 0) return lines.some((line) => ORDER_TOTAL.test(line));
   return positions.some((index) => lines.slice(Math.max(0, index - TOTAL_LINE_RADIUS), index + TOTAL_LINE_RADIUS + 1)
     .some((line) => ORDER_TOTAL.test(line)));
 }
@@ -107,7 +108,8 @@ export function checkoutStop(read?: unknown): CheckoutDecision {
     || allFields.some(({ kind }) => BILLING_KIND.test(normalize(kind ?? "")))
     || pageWording.some((line) => BILLING_PROMPT.test(line))) signals.push("billing-address");
   if (controlLabels.some((label) => SAVED_CARDS.test(label) || SAVED_CARD_PROMPT.test(label))
-    || pageWording.some((line) => SAVED_CARD_PROMPT.test(line))) signals.push("saved-card");
+    || pageWording.some((line) => SAVED_CARD_PROMPT.test(line))
+    || [...controlLabels, ...lines].some((label) => SAVED_CARD_ENDING.test(label))) signals.push("saved-card");
   if (allButtons.some((button) => {
     const label = normalize(button.label);
     return PAY_BUTTON.test(label) && totalNearButton(button, label, lines);

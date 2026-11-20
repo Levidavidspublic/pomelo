@@ -51,6 +51,19 @@ test("holds saved-card choosers in English and Hebrew", () => {
   }
 });
 
+test("holds masked card-ending choices without a saved-card heading", () => {
+  const fixtures: CheckoutPageRead[] = [
+    { buttons: [{ label: "Card ending in ••••" }, { label: "Continue" }] },
+    { items: ['[1] field:radio "כרטיס שמסתיים ב־••••"', '[2] button "המשך"'] },
+    { text: "Choose a payment method\nCard ending in ••••\nContinue", buttons: [{ label: "Continue" }] },
+  ];
+  for (const read of fixtures) {
+    const result = checkoutStop(read);
+    assert.equal(result.action, "hold");
+    assert.deepEqual(result.signals, ["saved-card"]);
+  }
+});
+
 test("holds when an order total is next to a purchase button", () => {
   for (const [nearbyText, labels] of [
     ["Order total: $28", ["Pay", "Pay now", "Place order", "Buy now", "Confirm purchase"]],
@@ -104,12 +117,43 @@ test("goes on payment news with a Pay button and no checkout evidence", () => {
   }
 });
 
-test("uses explicit button context and ignores values and destinations after numbered labels", () => {
-  assert.equal(checkoutStop({
+test("holds when the flat read places the total by the button and nearby text only has terms", () => {
+  const payNow = checkoutStop({
     text: "Order total: $28\nPay now",
     buttons: [{ label: "Pay now", nearbyText: "Payment news" }],
     items: ['[1] button "Pay now"'],
-  }).action, "go");
+  });
+  assert.equal(payNow.action, "hold");
+  assert.deepEqual(payNow.signals, ["pay-button", "order-total"]);
+
+  const review = checkoutStop({
+    title: "Review order",
+    text: "Review your items\nOrder total: $28\nPlace order",
+    buttons: [{ label: "Place order", nearbyText: "By placing your order, you agree to the terms." }],
+  });
+  assert.equal(review.action, "hold");
+  assert.deepEqual(review.signals, ["pay-button", "order-total"]);
+});
+
+test("holds when a long read has a total and the purchase button has no standalone line", () => {
+  const fixtures: CheckoutPageRead[] = [
+    {
+      text: "Review your items\nDelivery options\nOrder total: $28\nContinue or Pay now\nQuestions about your order?",
+      buttons: [{ label: "Pay now" }],
+    },
+    {
+      text: "בדיקת הזמנה\nאפשרויות משלוח\nסכום לתשלום: ₪28\nפרטי המשלוח\nמידע נוסף",
+      items: ['[1] button "לתשלום"'],
+    },
+  ];
+  for (const read of fixtures) {
+    const result = checkoutStop(read);
+    assert.equal(result.action, "hold");
+    assert.deepEqual(result.signals, ["pay-button", "order-total"]);
+  }
+});
+
+test("ignores values and destinations after numbered labels", () => {
   assert.equal(checkoutStop({
     text: "Order total: $28",
     items: ['[1] field:text "Search" = card number', '[2] link "Learn more" → Price list', '[3] link "Pay now"'],
