@@ -12,10 +12,10 @@ const INVISIBLE = /(?![\n\t])[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu;
 // Match these together so the outermost secret wins, even if it contains another supported shape.
 const COMPOUND_SECRET = new RegExp([
   /-----BEGIN (?<keyType>[A-Z ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \k<keyType>PRIVATE KEY-----|$)/.source,
-  /((?<![\w-])(?:[\w-]+[_-])?(?:password|token)["']?[ \t]*=[ \t]*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|[^\s"'`,;)}\]&]+)/.source,
+  /((?<![\p{ID_Continue}$-])(?:password|token)["']?[ \t]*=(?![=>])[ \t]*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|[^\s"'`,;)}\]&]+)/u.source,
   /(?<vaultQuote>["'`])op:\/\/(?:[^/\n"'`]+\/){2}[^\n"'`]+\k<vaultQuote>/.source,
   /\bop:\/\/(?:[^/\s<>"'`()\[\]{},;]+\/){2}[^\s<>"'`()\[\]{},;]+/.source,
-].join("|"), "gi");
+].join("|"), "giu");
 
 // Match the whole credential, including its provider prefix.
 const TOKEN_PATTERNS = [
@@ -26,7 +26,10 @@ const TOKEN_PATTERNS = [
   /\b(?:eyJ[A-Za-z0-9_-]+|SG)\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
   /\bbearer[ \t]+[A-Za-z0-9._~+/=-]{16,}/gi,
 ];
-const LONG_TOKEN = /[A-Za-z0-9_+/-]{32,}={0,2}/g;
+const LONG_TOKEN = /[A-Za-z0-9_+/-]{32,}(?:={1,2}(?![A-Za-z0-9_+/-]))?/g;
+const HEX_OR_UUID = /^(?:[a-f\d]+|[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12})$/i;
+const CAMEL_CASE = /^[a-z][a-z\d]*(?:[A-Z][a-z\d]+)+$/;
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 function exceedsLimit(text: string, limit: number): boolean {
   let count = 0;
@@ -73,12 +76,17 @@ export function cleanHandoffPrompt(
     });
   for (const pattern of TOKEN_PATTERNS) prompt = prompt.replace(pattern, mask);
   prompt = prompt.replace(LONG_TOKEN, (value) => {
-    const mixedCase = /[a-z]/.test(value) && /[A-Z]/.test(value);
-    const lettersAndDigits = /[a-z]/i.test(value) && /\d/.test(value);
-    // A slash alone can be part of a file path. Require stronger evidence of a base64 token.
-    const looksLikeToken = /^[a-f\d]{32,}$/i.test(value) || /[+=]/.test(value) ||
-      (value.includes("/") ? mixedCase && lettersAndDigits : mixedCase || lettersAndDigits);
-    return looksLikeToken ? mask() : value;
+    const token = value.replace(/=+$/, "");
+    if (HEX_OR_UUID.test(token)) return value;
+
+    // URLs and file paths also contain slashes. Require a plus or base64 padding to mask a slash-separated value.
+    const hasSlash = token.includes("/");
+    const hasBase64Markers = token.includes("+") || (hasSlash && token.length !== value.length);
+    if (hasBase64Markers && value.length % 4 === 0 && BASE64.test(value)) return mask();
+    if (hasSlash) return value;
+
+    // Require letters and digits outside a recognizable camelCase identifier for an unprefixed token.
+    return /[a-z]/i.test(token) && /\d/.test(token) && !CAMEL_CASE.test(token) ? mask() : value;
   });
 
   if (exceedsLimit(prompt, limit)) return tooLong;

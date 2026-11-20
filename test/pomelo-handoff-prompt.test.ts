@@ -44,6 +44,36 @@ test("masks a long token with no provider prefix", () => {
   assert.deepEqual(result, { ok: true, prompt: `Check •••• in ${file}.`, hidden: 1, cut: false });
 });
 
+test("masks a padded base64 token that contains a slash", () => {
+  const token = ["Ab9z", "qW2x", "7Lm0", "eT3u", "Cr6o", "vX5n", "pY4f", "/Kb8", "sdQ="].join("");
+  assert.deepEqual(cleanHandoffPrompt(token, "open_thread"), { ok: true, prompt: "••••", hidden: 1, cut: false });
+});
+
+test("keeps repository links, commit hashes, UUIDs and camelCase names intact", () => {
+  const prompts = [
+    "Review https://github.com/ExampleOrganization/example-project/pull/123.",
+    "Compare commit 3a2f6b98c41d005e3ef9a7b42f043af62ae8b901.",
+    "Resume session c5b91397-2ec1-452b-8f03-e77b4c8d9b5a.",
+    "Inspect getCurrentThreadConfigurationFromSettings.",
+    "Inspect getCurrentThreadConfigurationFromPhase2Settings.",
+    "Keep getCurrentThreadConfigurationFromSettings=enabled.",
+  ];
+  for (const prompt of prompts) {
+    assert.deepEqual(cleanHandoffPrompt(prompt, "open_thread"), { ok: true, prompt, hidden: 0, cut: false });
+  }
+});
+
+test("keeps comparisons, arrows and token limits intact", () => {
+  const prompt = "if (token === saved || password == saved) check(token => token); max_token=100";
+  assert.deepEqual(cleanHandoffPrompt(prompt, "spawn_subagent"), { ok: true, prompt, hidden: 0, cut: false });
+});
+
+test("masks a token query value without damaging the rest of the repository link", () => {
+  const url = "https://github.com/ExampleOrganization/example-project/pull/123";
+  const result = cleanHandoffPrompt(`${url}?token=${canary}&view=files`, "open_thread");
+  assert.deepEqual(result, { ok: true, prompt: `${url}?token=••••&view=files`, hidden: 1, cut: false });
+});
+
 test("masks complete vault paths, private keys and assigned values once each", () => {
   const vaultPath = `op://${["example-vault", "sample-item", "sample-field"].join("/")}`;
   const keyBlock = ["-----BEGIN TEST PRIVATE KEY-----", canary, "-----END TEST PRIVATE KEY-----"].join("\n");
