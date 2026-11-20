@@ -6,11 +6,12 @@ type GitConfigOptions = {
 };
 
 type GitConfigProblem = { key: string; origin: string | null; reason: string };
-type Setting = { origin: string; value?: string; rewriteKey?: string };
+type Setting = { origin: string; value?: string; rewriteKey?: string; credentialScope?: string };
 
 const configRow = /^file:([^\x00-\x1f\x7f]+)\t([^\x00\r]+)$/;
 const configKey = /^[a-z][a-z\d-]*\.(?:[^\t]*\.)?[a-z][a-z\d-]*$/i;
 const urlRewrite = /^(url\..*?\.(insteadof|pushinsteadof))(?:=[\s\S]*)?$/i;
+const credentialHelper = /^credential(?:\.([^=\t]+?|[a-z][a-z\d+.-]*:\/\/[^\t]+?))?\.helper(?:=([\s\S]*))?$/i;
 
 function gitBoolean(value: string | undefined): boolean | undefined {
   if (value === undefined || /^(?:true|yes|on)$/i.test(value)) return true;
@@ -41,7 +42,7 @@ export function gitConfigCheck(text: string, options: GitConfigOptions = {}): {
   verdict: "go" | "stop";
   problems: GitConfigProblem[];
 } {
-  const settings = new Map<string, Setting>();
+  const settings = new Map<string, Setting[]>();
   const problems: GitConfigProblem[] = [];
 
   if (!text.trim()) {
@@ -61,7 +62,21 @@ export function gitConfigCheck(text: string, options: GitConfigOptions = {}): {
     // A rewrite's URL subsection can contain '=', and can carry sensitive data.
     const rewrite = urlRewrite.exec(entry);
     if (rewrite) {
-      settings.set(rewrite[1].toLowerCase(), { origin, rewriteKey: `url.*.${rewrite[2].toLowerCase()}` });
+      settings.set(rewrite[1].toLowerCase(), [{ origin, rewriteKey: `url.*.${rewrite[2].toLowerCase()}` }]);
+      continue;
+    }
+
+    const helper = credentialHelper.exec(entry);
+    if (helper) {
+      const [, credentialScope, value] = helper;
+      let helpers = settings.get("credential.helper") ?? [];
+      if (value === "") {
+        // A scoped reset only clears helpers for matching URLs. Keep findings for other contexts.
+        helpers = credentialScope === undefined ? [] : helpers.filter(setting => setting.credentialScope !== credentialScope);
+      } else {
+        helpers.push({ origin, value, credentialScope });
+      }
+      settings.set("credential.helper", helpers);
       continue;
     }
 
@@ -71,11 +86,20 @@ export function gitConfigCheck(text: string, options: GitConfigOptions = {}): {
       problems.push({ key: "git-config", origin, reason: `Line ${index + 1} has no readable Git config key.` });
       continue;
     }
-    settings.set(key, { origin, value: separator === -1 ? undefined : entry.slice(separator + 1) });
+    settings.set(key, [{ origin, value: separator === -1 ? undefined : entry.slice(separator + 1) }]);
   }
 
-  const hasSigningKey = Boolean(settings.get("user.signingkey")?.value?.trim());
-  for (const [key, { origin, value, rewriteKey }] of settings) {
+  const hasSigningKey = Boolean(settings.get("user.signingkey")?.[0]?.value?.trim());
+  for (const [key, entries] of settings) {
+    if (key === "credential.helper") {
+      for (const { origin, value, credentialScope } of entries) {
+        const reason = credentialHelperProblem(value);
+        if (reason) problems.push({ key: credentialScope === undefined ? key : "credential.*.helper", origin, reason });
+      }
+      continue;
+    }
+
+    const [{ origin, value, rewriteKey }] = entries;
     if (rewriteKey) {
       problems.push({ key: rewriteKey, origin, reason: "Git rewrites remote URLs using this setting." });
       continue;
@@ -85,9 +109,6 @@ export function gitConfigCheck(text: string, options: GitConfigOptions = {}): {
     switch (key) {
       case "core.hookspath":
         if (!hooksPathIsInside(value, options.repoRoot)) reason = "The hooks path cannot be confirmed inside the repository.";
-        break;
-      case "credential.helper":
-        reason = credentialHelperProblem(value);
         break;
       case "core.autocrlf": {
         const mode = value?.toLowerCase() === "input" ? "input" : gitBoolean(value) === true ? "true" : undefined;
@@ -112,7 +133,7 @@ export function gitConfigCheck(text: string, options: GitConfigOptions = {}): {
   }
 
   for (const key of ["user.name", "user.email"]) {
-    const setting = settings.get(key);
+    const setting = settings.get(key)?.[0];
     if (!setting?.value?.trim()) {
       problems.push({ key, origin: setting?.origin ?? null, reason: "The Git identity setting is missing or blank." });
     }

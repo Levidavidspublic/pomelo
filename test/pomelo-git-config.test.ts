@@ -62,7 +62,50 @@ test("reports each risky setting and the file that supplied it", () => {
   }
 
   const result = check(...riskySettings.map(([setting]) => row(global, setting)));
-  assert.deepEqual(result.problems.map(({ key }) => key), [...new Set(riskySettings.map(([, key]) => key))]);
+  assert.deepEqual(result.problems.map(({ key }) => key), [
+    "core.hookspath",
+    "url.*.insteadof",
+    "url.*.pushinsteadof",
+    "credential.helper",
+    "credential.helper",
+    "credential.helper",
+    "core.autocrlf",
+    "commit.gpgsign",
+    "tag.gpgsign",
+    "core.fsmonitor",
+    "core.sshcommand",
+    "push.default",
+  ]);
+});
+
+test("reports a URL-scoped credential helper without exposing its scope", () => {
+  for (const scope of ["https://destination.example.invalid", rewriteBase]) {
+    const result = check(row(global, `Credential.${scope}.Helper=store`));
+    assert.equal(result.verdict, "stop");
+    assert.deepEqual(result.problems.map(({ key, origin }) => [key, origin]), [["credential.*.helper", global]]);
+    assert.ok(!JSON.stringify(result).includes("destination.example.invalid"));
+  }
+});
+
+test("reports an earlier credential helper that remains active alongside a later one", () => {
+  const result = check(row(global, "credential.helper=store"), row(local, "CREDENTIAL.HELPER=cache"));
+  assert.equal(result.verdict, "stop");
+  assert.deepEqual(result.problems.map(({ key, origin }) => [key, origin]), [["credential.helper", global]]);
+});
+
+test("honors an empty helper reset wherever it applies", () => {
+  const scopedHelper = `credential.${rewriteBase}.helper`;
+  const unscoped = row(global, "credential.helper=store");
+  const scoped = row(global, `${scopedHelper}=${helperPath}`);
+  const scopedReset = row(local, `${scopedHelper}=`);
+  const globalReset = row(local, "credential.helper=");
+  const cache = row(local, "credential.helper=cache");
+
+  assert.deepEqual(check(scoped, scopedReset), { verdict: "go", problems: [] });
+  assert.deepEqual(check(unscoped, scoped, globalReset, cache), { verdict: "go", problems: [] });
+  const result = check(unscoped, scoped, scopedReset, cache);
+  assert.equal(result.verdict, "stop");
+  assert.deepEqual(result.problems.map(({ key, origin }) => [key, origin]), [["credential.helper", global]]);
 });
 
 test("keeps config values and URL subsections out of the result", () => {
