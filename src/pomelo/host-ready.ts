@@ -27,7 +27,18 @@ const CHECK_ACTIONS: Readonly<Record<string, HostAction>> = Object.freeze({
   unreadable: "stop",
 });
 
+const MAX_NAME_LENGTH = 100;
 const MAX_REASON_LENGTH = 200;
+const MAX_REASONS_PER_CHECK = 10;
+
+function noteText(value: string, maxLength: number): string {
+  return value.replace(/[\p{Cc}\p{Bidi_Control}\u2028\u2029]/gu, "").slice(0, maxLength);
+}
+
+function displayName(name: string): string {
+  const cleaned = noteText(name, MAX_NAME_LENGTH);
+  return cleaned.trim() ? cleaned : "[check name omitted]";
+}
 
 function isCheckName(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -41,7 +52,9 @@ function readCheckResult(value: unknown): CheckResult | undefined {
   const cleanReasons: string[] = [];
   for (const reason of reasons) {
     if (typeof reason !== "string") return;
-    cleanReasons.push(reason.replace(/[\p{Cc}\u2028\u2029]/gu, "").slice(0, MAX_REASON_LENGTH));
+    if (cleanReasons.length < MAX_REASONS_PER_CHECK) {
+      cleanReasons.push(noteText(reason, MAX_REASON_LENGTH));
+    }
   }
   return { name, action, reasons: cleanReasons };
 }
@@ -50,6 +63,7 @@ export function hostReady(required: unknown, results: unknown): HostReadyVerdict
   const requiredNames = new Set<string>();
   const issues = new Set<string>();
   if (Array.isArray(required)) {
+    if (required.length === 0) issues.add("No required checks were supplied.");
     for (const name of required) {
       if (isCheckName(name)) requiredNames.add(name);
       else issues.add("Invalid required check name.");
@@ -71,7 +85,8 @@ export function hostReady(required: unknown, results: unknown): HostReadyVerdict
       const previous = checks.get(name);
       if (previous) {
         previous.actions.add(action);
-        for (const reason of reasons) previous.reasons.push(reason);
+        const remaining = MAX_REASONS_PER_CHECK - previous.reasons.length;
+        previous.reasons.push(...reasons.slice(0, remaining));
       } else {
         checks.set(name, { actions: new Set([action]), reasons });
       }
@@ -80,24 +95,28 @@ export function hostReady(required: unknown, results: unknown): HostReadyVerdict
     issues.add("Check results must be an array.");
   }
 
-  const missing = [...requiredNames].filter((name) => !checks.has(name));
+  const missing = [...requiredNames].filter((name) => !checks.has(name)).map(displayName);
   const byCheck: CheckResult[] = [];
   let action: HostAction = missing.length || issues.size ? "stop" : "go";
 
   for (const [name, { actions, reasons }] of checks) {
     const [reportedAction] = actions;
-    let checkAction = "stop";
+    let checkAction = reportedAction;
+    let issue: string | undefined;
     if (actions.size > 1) {
-      reasons.push("Conflicting check actions.");
+      issue = "Conflicting check actions.";
     } else if (!Object.hasOwn(CHECK_ACTIONS, reportedAction)) {
-      reasons.push("Unknown check action.");
-    } else {
-      checkAction = reportedAction;
+      issue = "Unknown check action.";
+    }
+    if (issue) {
+      checkAction = "stop";
+      if (reasons.length === MAX_REASONS_PER_CHECK) reasons.pop();
+      reasons.push(issue);
     }
 
     const level = CHECK_ACTIONS[checkAction];
     if (level === "stop" || action === "go") action = level;
-    byCheck.push({ name, action: checkAction, reasons });
+    byCheck.push({ name: displayName(name), action: checkAction, reasons });
   }
 
   const runCount = requiredNames.size - missing.length;

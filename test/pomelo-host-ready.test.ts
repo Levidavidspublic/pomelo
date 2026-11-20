@@ -17,6 +17,15 @@ test("returns go when all required checks ran and starts the summary with the ve
   assert.deepEqual(verdict.byCheck, [disk, memory]);
 });
 
+test("stops when the required check list is empty", () => {
+  for (const results of [[], [checked("disk")]]) {
+    const verdict = hostReady([], results);
+
+    assert.equal(verdict.action, "stop");
+    assert.match(verdict.summary, /^stop\b.*0 of 0 required checks ran.*No required checks/);
+  }
+});
+
 test("maps the host checks' action words to the three readiness levels", () => {
   for (const action of ["clean-up", "clean", "cleanup", "wait", "fewer", "reinstall"]) {
     const result = checked("host", action);
@@ -133,4 +142,39 @@ test("removes control characters and bounds reason text without changing the inp
   assert.ok(reported.length <= 200);
   assert.doesNotMatch(reported, /\p{Cc}/u);
   assert.deepEqual(disk.reasons, [reason]);
+});
+
+test("bounds each check's reasons across repeated results and keeps the conflict explanation", () => {
+  const firstReasons = Array.from({ length: 6 }, (_, index) => `First result, reason ${index + 1}.`);
+  const nextReasons = Array.from({ length: 100 }, (_, index) => `Second result, reason ${index + 1}.`);
+  const verdict = hostReady(["disk"], [
+    checked("disk", "go", ...firstReasons),
+    checked("disk", "stop", ...nextReasons),
+  ]);
+
+  assert.equal(verdict.action, "stop");
+  assert.deepEqual(verdict.byCheck[0].reasons, [
+    ...firstReasons, ...nextReasons.slice(0, 3), "Conflicting check actions.",
+  ]);
+});
+
+test("rejects malformed reasons beyond the reporting limit", () => {
+  const reasons = [...Array<string>(100).fill("Valid reason."), false];
+  const verdict = hostReady(["disk"], [{ name: "disk", action: "go", reasons }]);
+
+  assert.equal(verdict.action, "stop");
+  assert.deepEqual(verdict.missing, ["disk"]);
+});
+
+test("cleans and bounds names in the report while matching the original names", () => {
+  const name = "d\u0000i\u001bs\nk\u2028-" + "x".repeat(300);
+  const displayName = "disk-" + "x".repeat(95);
+  const matching = hostReady([name], [checked(name)]);
+  const different = hostReady([name], [checked(displayName)]);
+
+  assert.equal(matching.action, "go");
+  assert.deepEqual(matching.byCheck, [checked(displayName)]);
+  assert.equal(different.action, "stop");
+  assert.deepEqual(different.missing, [displayName]);
+  assert.match(different.summary, /^stop\b.*0 of 1 required checks ran/);
 });
