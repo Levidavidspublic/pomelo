@@ -28,11 +28,13 @@ test("load above the stop limit on both averages stops the run", () => {
   assert.deepEqual(result.loadPerCore, { oneMinute: 2.25, fiveMinute: 2.5 });
 });
 
-test("a one-minute spike with a calm five-minute load fits workers", () => {
-  const result = cpuLoad("9.00 0.25 0.70 2/345 12345", "4", { workersWanted: 4 });
-  assert.equal(result.verdict, "fewer");
-  assert.equal(result.workersThatFit, 3);
-  assert.deepEqual(result.loadPerCore, { oneMinute: 2.25, fiveMinute: 0.0625 });
+test("a rising one-minute load never admits more workers with a calm five-minute load", () => {
+  for (const [oneMinute, workersThatFit] of [[0.5, 3], [2.25, 1], [6, 1], [8, 1], [9, 1]]) {
+    const result = cpuLoad(`${oneMinute} 0.25 0.70 2/345 12345`, "4", { workersWanted: 4 });
+    assert.equal(result.verdict, "fewer", `one-minute load ${oneMinute}`);
+    assert.equal(result.workersThatFit, workersThatFit, `one-minute load ${oneMinute}`);
+    assert.deepEqual(result.loadPerCore, { oneMinute: oneMinute / 4, fiveMinute: 0.0625 });
+  }
 });
 
 test("a reading equal to the stop limit can still admit workers", () => {
@@ -42,7 +44,7 @@ test("a reading equal to the stop limit can still admit workers", () => {
 });
 
 test("the run stops when there is too little CPU capacity for one worker", () => {
-  for (const loadavgText of ["7.90 7.90 0.70 2/345 12345", "9.00 8.00 0.70 2/345 12345"]) {
+  for (const loadavgText of ["7.90 7.90 0.70 2/345 12345", "9.00 8.00 0.70 2/345 12345", "9.00 3.01 0.70 2/345 12345"]) {
     const result = cpuLoad(loadavgText, "4");
     assert.equal(result.verdict, "stop");
     assert.equal(result.workersThatFit, 0);

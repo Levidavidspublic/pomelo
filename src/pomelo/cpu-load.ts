@@ -43,11 +43,10 @@ export function cpuLoad(
     return { verdict: "stop", workersThatFit: 0, loadPerCore, reason: "Both CPU load averages are above the stop limit." };
   }
 
-  // A one-minute spike alone uses the five-minute average to size workers.
-  const loadForCapacity = loadPerCore.oneMinute > stopAbovePerCore
-    ? fiveMinuteLoad
-    : Math.max(oneMinuteLoad, fiveMinuteLoad);
-  const freeCores = Math.max(0, cores - loadForCapacity);
+  // A short spike can reduce capacity to one worker when the five-minute load still leaves room.
+  const recentFreeCores = Math.max(perWorkerCores, cores - oneMinuteLoad);
+  const sustainedFreeCores = cores - fiveMinuteLoad;
+  const freeCores = Math.max(0, Math.min(recentFreeCores, sustainedFreeCores));
   const workersThatFit = Math.min(workersWanted, Math.floor(freeCores / perWorkerCores));
   if (workersThatFit === 0) {
     return { verdict: "stop", workersThatFit, loadPerCore, reason: "CPU capacity is too low for one worker." };
