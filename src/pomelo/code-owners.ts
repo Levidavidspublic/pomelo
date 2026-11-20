@@ -24,8 +24,14 @@ function compilePattern(pattern: string): RegExp | undefined {
     return last ? escaped : `${escaped}/`;
   }).join("");
 
-  const descendants = directory ? "/[\\s\\S]+" : "";
-  return new RegExp(`${start}${body}${descendants}$`);
+  // A literal last part may name either a file or a directory.
+  let suffix = "";
+  if (directory) {
+    suffix = "/[\\s\\S]+";
+  } else if (!parts[parts.length - 1].includes("*")) {
+    suffix = "(?:/[\\s\\S]+)?";
+  }
+  return new RegExp(`${start}${body}${suffix}$`);
 }
 
 /** Checks ownership for concrete, repository-relative file paths. */
@@ -51,6 +57,11 @@ export function checkCodeOwners(text: string, protectedPaths: readonly string[],
 
   const owner = requiredOwner.toLowerCase();
   for (const path of protectedPaths) {
+    if (/[*?[\]]/.test(path)) {
+      findings.push({ path, line: null, reason: "Supply a concrete file path for each protected file." });
+      continue;
+    }
+
     const rule = rules.findLast(({ matcher }) => matcher.test(path));
     if (!rule) {
       findings.push({ path, line: null, reason: "No matching CODEOWNERS rule." });

@@ -67,6 +67,43 @@ test("a root-anchored directory covers descendants only at the root", () => {
   assert.deepEqual(result.findings.map(({ path }) => path), paths.slice(1));
 });
 
+test("later literal directory rules override or remove ownership without a trailing slash", () => {
+  const text = [
+    `/.github/ ${owner}`,
+    `/.github/workflows @another-example`,
+    `/docs/ ${owner}`,
+    "/docs/harness",
+  ].join("\n");
+  const paths = [".github/workflows/ci.yml", "docs/harness/sub/x.md", ".github/workflows-extra/ci.yml"];
+  const result = checkCodeOwners(text, paths, owner);
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.findings.map(({ path, line }) => ({ path, line })), [
+    { path: paths[0], line: 2 },
+    { path: paths[1], line: 4 },
+  ]);
+  assert.match(result.findings[0].reason, /required owner/i);
+  assert.match(result.findings[1].reason, /ownership removed/i);
+});
+
+test("rejects a protected glob even when a broad rule has the required owner", () => {
+  const text = `/.github/** ${owner}\n/.github/workflows @another-example`;
+  const result = checkCodeOwners(text, [".github/**"], owner);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].path, ".github/**");
+  assert.equal(result.findings[0].line, null);
+  assert.match(result.findings[0].reason, /concrete file path/i);
+});
+
+test("a rule ending in a single star covers only one level", () => {
+  const paths = ["docs/intro.md", "docs/harness/x.md"];
+  const result = checkCodeOwners(`docs/* ${owner}`, paths, owner);
+
+  assert.deepEqual(result.findings.map(({ path }) => path), [paths[1]]);
+});
+
 test("a single star stays within one path part and dots are literal", () => {
   const paths = ["docs/harness/01-PRD.md", "docs/harness/sub/x.md", "docs/harness/xmd", "nested/docs/harness/x.md"];
   const result = checkCodeOwners(`docs/harness/*.md ${owner}`, paths, owner);
