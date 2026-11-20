@@ -8,13 +8,17 @@ export const DEFAULT_HANDOFF_PROMPT_LIMIT = 8_000;
 
 const MASK = "••••";
 const INVISIBLE = /(?![\n\t])[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu;
+const SECRET_NAME = String.raw`(?:[a-z\d]+[_-])*(?:password|token|(?:api|access)[_-]?key)`;
+const ASSIGNMENT_START = String.raw`(?<![\p{ID_Continue}$-])(?<name>${SECRET_NAME})["']?[ \t]*=(?![=>])[ \t]*`;
+const QUOTED_VALUE = /(?<quote>["'`])(?<quotedValue>(?:\\[\s\S]|(?!\k<quote>)[^\\])*)(?:(?<closeQuote>\k<quote>)|\\?$)/;
 
 // Match these together so the outermost secret wins, even if it contains another supported shape.
 const COMPOUND_SECRET = new RegExp([
   /-----BEGIN (?<keyType>[A-Z ]*)PRIVATE KEY-----[\s\S]*?(?:-----END \k<keyType>PRIVATE KEY-----|$)/.source,
-  /((?<![\p{ID_Continue}$-])(?:password|token)["']?[ \t]*=(?![=>])[ \t]*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|[^\s"'`,;)}\]&]+)/u.source,
+  String.raw`(?<=[?&])(?<=\bhttps?:\/\/[^\s<>"'\x60]*[?&])(?<queryName>${SECRET_NAME})=(?![=>])(?<queryValue>[^&#\s"'\x60<>]+)`,
+  String.raw`(?<label>${ASSIGNMENT_START})(?:${QUOTED_VALUE.source}|(?<value>[^\s"'\x60]\S*))`,
   /(?<vaultQuote>["'`])op:\/\/(?:[^/\n"'`]+\/){2}[^\n"'`]+\k<vaultQuote>/.source,
-  /\bop:\/\/(?:[^/\s<>"'`()\[\]{},;]+\/){2}[^\s<>"'`()\[\]{},;]+/.source,
+  /\bop:\/\/(?:[^/\s<>"'`()\[\]{},;]+(?:[ \t]+[^/\s<>"'`()\[\]{},;]+)*\/){2}[^\s<>"'`()\[\]{},;]+/.source,
 ].join("|"), "giu");
 
 // Match the whole credential, including its provider prefix.
@@ -26,10 +30,35 @@ const TOKEN_PATTERNS = [
   /\b(?:eyJ[A-Za-z0-9_-]+|SG)\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
   /\bbearer[ \t]+[A-Za-z0-9._~+/=-]{16,}/gi,
 ];
-const LONG_TOKEN = /[A-Za-z0-9_+/-]{32,}(?:={1,2}(?![A-Za-z0-9_+/-]))?/g;
-const HEX_OR_UUID = /^(?:[a-f\d]+|[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12})$/i;
-const CAMEL_CASE = /^[a-z][a-z\d]*(?:[A-Z][a-z\d]+)+$/;
+const LONG_TOKEN = /(\bhttps?:\/\/[^\s<>"'`]+)|[A-Za-z0-9_+/-]{32,}(?:={1,2}(?![A-Za-z0-9_+/-]))?/gi;
+const HEX = /^[a-f\d]+$/i;
+const UUID = /^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/i;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+const FILE_EXTENSION = /^\.[a-z][a-z\d]{0,9}(?![\w-])/i;
+const SEPARATED_IDENTIFIER = /^(?:[a-z]{2,}\d*|[a-z]?\d+)(?:[-_](?:[a-z]{2,}\d*|[a-z]?\d+))+$/i;
+const CASED_IDENTIFIER = /^(?:[a-z][a-z\d]*)?(?:[A-Z][a-z]*\d*)+$/;
+const SHORT_CASE_GROUP = /\d[A-Z][a-z](?=[A-Z\d]|$)/g;
+
+function isLongSecret(value: string, offset: number, text: string): boolean {
+  const token = value.replace(/=+$/, "");
+  if (UUID.test(token)) return false;
+  // Bare 40-character hex also identifies Git commits. Explicit credential assignments are handled first.
+  if (HEX.test(token)) return token.length === 32 || token.length === 64;
+
+  const hasSlash = token.includes("/");
+  const hasBase64Markers = token.includes("+") || value.length !== token.length;
+  if (hasBase64Markers && value.length % 4 === 0 && BASE64.test(value)) return true;
+  if (hasSlash) {
+    const hasPathSyntax = FILE_EXTENSION.test(text.slice(offset + value.length))
+      || (token.startsWith("/") && text[offset - 1] === ".");
+    return token.length === 40 && !hasPathSyntax && BASE64.test(token);
+  }
+
+  if (!/[a-z]/i.test(token) || !/\d/.test(token) || SEPARATED_IDENTIFIER.test(token)) return false;
+  const looksLikeCode = /[A-Z][a-z]{2,}/.test(token) && CASED_IDENTIFIER.test(token);
+  // Repeated short letter/digit groups can still satisfy the casing rule.
+  return !looksLikeCode || (token.match(SHORT_CASE_GROUP)?.length ?? 0) > 1;
+}
 
 function exceedsLimit(text: string, limit: number): boolean {
   let count = 0;
@@ -63,30 +92,24 @@ export function cleanHandoffPrompt(
     return MASK;
   };
 
-  prompt = prompt.replace(COMPOUND_SECRET,
-    (match, _keyType: string | undefined, label?: string, value?: string, vaultQuote?: string) => {
-      if (label && value) {
-        const quote = value[0];
-        if (quote === '"' || quote === "'" || quote === "`") {
-          return value.slice(1, -1) === MASK ? match : `${label}${quote}${mask()}${quote}`;
-        }
-        return value === MASK ? match : label + mask();
-      }
-      return vaultQuote ? `${vaultQuote}${mask()}${vaultQuote}` : mask();
-    });
+  prompt = prompt.replace(COMPOUND_SECRET, (match, ...captures: unknown[]) => {
+    const { label, name, quote, quotedValue, closeQuote, value, queryName, queryValue, vaultQuote } =
+      captures.at(-1) as Record<string, string | undefined>;
+    if (queryName) {
+      const isLimit = queryName.toLowerCase() === "max_token" && /^\d+$/.test(queryValue ?? "");
+      return queryValue === MASK || isLimit ? match : `${queryName}=${mask()}`;
+    }
+    if (label) {
+      if (quote) return quotedValue === MASK ? match : `${label}${quote}${mask()}${closeQuote ?? ""}`;
+      // max_token is a numeric limit when assigned an integer.
+      if (value === MASK || (name?.toLowerCase() === "max_token" && /^\d+[;,)}\]]*$/.test(value ?? ""))) return match;
+      return label + mask();
+    }
+    return vaultQuote ? `${vaultQuote}${mask()}${vaultQuote}` : mask();
+  });
   for (const pattern of TOKEN_PATTERNS) prompt = prompt.replace(pattern, mask);
-  prompt = prompt.replace(LONG_TOKEN, (value) => {
-    const token = value.replace(/=+$/, "");
-    if (HEX_OR_UUID.test(token)) return value;
-
-    // URLs and file paths also contain slashes. Require a plus or base64 padding to mask a slash-separated value.
-    const hasSlash = token.includes("/");
-    const hasBase64Markers = token.includes("+") || (hasSlash && token.length !== value.length);
-    if (hasBase64Markers && value.length % 4 === 0 && BASE64.test(value)) return mask();
-    if (hasSlash) return value;
-
-    // Require letters and digits outside a recognizable camelCase identifier for an unprefixed token.
-    return /[a-z]/i.test(token) && /\d/.test(token) && !CAMEL_CASE.test(token) ? mask() : value;
+  prompt = prompt.replace(LONG_TOKEN, (value, url: string | undefined, offset: number, text: string) => {
+    return !url && isLongSecret(value, offset, text) ? mask() : value;
   });
 
   if (exceedsLimit(prompt, limit)) return tooLong;

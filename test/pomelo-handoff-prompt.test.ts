@@ -49,7 +49,21 @@ test("masks a padded base64 token that contains a slash", () => {
   assert.deepEqual(cleanHandoffPrompt(token, "open_thread"), { ok: true, prompt: "••••", hidden: 1, cut: false });
 });
 
-test("keeps repository links, commit hashes, UUIDs and camelCase names intact", () => {
+test("masks a 40-character cloud key with a slash and no padding", () => {
+  const token = ["Ab9z", "qW2x", "7Lm0", "eT3u", "Cr6o", "vX5n", "pY4f", "/Kb8", "sdQ1", "Vz6N"].join("");
+  const result = cleanHandoffPrompt(`Check ${token}.`, "open_thread");
+  assert.deepEqual(result, { ok: true, prompt: "Check ••••.", hidden: 1, cut: false });
+  assert.equal(JSON.stringify(result).includes(token), false);
+});
+
+test("masks 32- and 64-character hex credentials and labeled 40-character keys", () => {
+  const fragment = ["e9b1", "40c8"].join("");
+  const raw = `Check ${fragment.repeat(4)} and ${fragment.repeat(8)}. API_KEY=${fragment.repeat(5)}`;
+  const result = cleanHandoffPrompt(raw, "open_thread");
+  assert.deepEqual(result, { ok: true, prompt: "Check •••• and ••••. API_KEY=••••", hidden: 3, cut: false });
+});
+
+test("keeps repository links, commit hashes, UUIDs and long code identifiers intact", () => {
   const prompts = [
     "Review https://github.com/ExampleOrganization/example-project/pull/123.",
     "Compare commit 3a2f6b98c41d005e3ef9a7b42f043af62ae8b901.",
@@ -57,6 +71,9 @@ test("keeps repository links, commit hashes, UUIDs and camelCase names intact", 
     "Inspect getCurrentThreadConfigurationFromSettings.",
     "Inspect getCurrentThreadConfigurationFromPhase2Settings.",
     "Keep getCurrentThreadConfigurationFromSettings=enabled.",
+    "Switch to p1-86-backend-handoff-prompt-rule-function.",
+    "Read current_phase_2_handoff_prompt_configuration.",
+    "Inspect CurrentThreadConfigurationFromPhase2Settings.",
   ];
   for (const prompt of prompts) {
     assert.deepEqual(cleanHandoffPrompt(prompt, "open_thread"), { ok: true, prompt, hidden: 0, cut: false });
@@ -68,10 +85,27 @@ test("keeps comparisons, arrows and token limits intact", () => {
   assert.deepEqual(cleanHandoffPrompt(prompt, "spawn_subagent"), { ok: true, prompt, hidden: 0, cut: false });
 });
 
-test("masks a token query value without damaging the rest of the repository link", () => {
+test("masks token query values without damaging the rest of the repository link", () => {
   const url = "https://github.com/ExampleOrganization/example-project/pull/123";
-  const result = cleanHandoffPrompt(`${url}?token=${canary}&view=files`, "open_thread");
-  assert.deepEqual(result, { ok: true, prompt: `${url}?token=••••&view=files`, hidden: 1, cut: false });
+  const result = cleanHandoffPrompt(`${url}?token=${canary}&max_token=100&view=files&access_token=x#top`, "open_thread");
+  assert.deepEqual(result, {
+    ok: true, prompt: `${url}?token=••••&max_token=100&view=files&access_token=••••#top`, hidden: 2, cut: false,
+  });
+});
+
+test("masks short assigned credentials and keeps punctuation inside their values", () => {
+  const password = ["test", ",;&)}]", "tail"].join("");
+  const result = cleanHandoffPrompt(`DB_PASSWORD=${password} access_token=x API_TOKEN=y API_KEY=z`, "open_thread");
+  assert.deepEqual(result, {
+    ok: true, prompt: "DB_PASSWORD=•••• access_token=•••• API_TOKEN=•••• API_KEY=••••", hidden: 4, cut: false,
+  });
+  assert.equal(JSON.stringify(result).includes("tail"), false);
+});
+
+test("masks an assignment with an unterminated quote through the end of the prompt", () => {
+  const secret = ["sample", "secret"].join(" ");
+  const result = cleanHandoffPrompt(`Use API_TOKEN="${secret}\ncontinuation`, "open_thread");
+  assert.deepEqual(result, { ok: true, prompt: 'Use API_TOKEN="••••', hidden: 1, cut: false });
 });
 
 test("masks complete vault paths, private keys and assigned values once each", () => {
@@ -100,6 +134,12 @@ test("counts a quoted vault path or multiline assigned value as one secret", () 
   const value = ["sample", "value"].join("\n");
   const result = cleanHandoffPrompt(`Read "${vaultPath}" and password="${value}".`, "open_thread");
   assert.deepEqual(result, { ok: true, prompt: 'Read "••••" and password="••••".', hidden: 2, cut: false });
+});
+
+test("masks a bare vault path with spaces in the vault and item names", () => {
+  const vaultPath = `op://${["example vault", "sample item", "sample-field"].join("/")}`;
+  const result = cleanHandoffPrompt(`Read (${vaultPath}) before continuing.`, "open_thread");
+  assert.deepEqual(result, { ok: true, prompt: "Read (••••) before continuing.", hidden: 1, cut: false });
 });
 
 test("refuses a long prompt even when masking would bring it under the limit", () => {
