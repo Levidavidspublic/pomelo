@@ -43,6 +43,8 @@ test("reports short circuits, ternaries, and conditions split across added lines
       { line: 13, text: ") {" },
       { line: 14, text: "  return;" },
       { line: 15, text: "}" },
+      { line: 17, text: "if (ready ? process.arch : fallback) return;" },
+      { line: 18, text: "Number(process.env.SAMPLE) >= 2 && verify();" },
     ],
   }]), {
     ok: false,
@@ -52,6 +54,8 @@ test("reports short circuits, ternaries, and conditions split across added lines
       { path, line: 7, kind: "ci" },
       { path, line: 11, kind: "env" },
       { path, line: 12, kind: "platform" },
+      { path, line: 17, kind: "arch" },
+      { path, line: 18, kind: "env" },
     ],
   });
 });
@@ -72,11 +76,36 @@ test("ignores comments and string literals while still checking code after them"
       { line: 11, text: '/* example */ if (process.platform === "win32") return;' },
       { line: 12, text: "/*" },
       { line: 17, text: "if (process.env.CI) return;" },
+      { line: 20, text: "*/ if (process.env.CI) return;" },
+      { line: 21, text: 'const rendered = `example ${`if (process.arch) return;`} // literal`;' },
+      { line: 22, text: 'const renderedCheck = `example ${process.arch === "arm64" ? verify() : ""}`;' },
     ],
   }]), {
     ok: false,
-    findings: [{ path, line: 11, kind: "platform" }, { path, line: 17, kind: "ci" }],
+    findings: [
+      { path, line: 11, kind: "platform" },
+      { path, line: 20, kind: "ci" },
+      { path, line: 22, kind: "arch" },
+    ],
   });
+});
+
+test("keeps lexical state within each file and expression context within contiguous additions", () => {
+  const otherPath = "test/pomelo-other.test.ts";
+  assert.deepEqual(findMachineSkips([{
+    path,
+    addedLines: [
+      { line: 3, text: "const arch = process.arch" },
+      { line: 4, text: "ready && verify();" },
+      { line: 5, text: "assert.equal(process.arch, ready && verify());" },
+      { line: 6, text: "if (" },
+      { line: 8, text: "assert.equal(process.arch, expected);" },
+      { line: 9, text: "/*" },
+    ],
+  }, {
+    path: otherPath,
+    addedLines: [{ line: 1, text: 'if (process /* comment */ . env ["CI"]) return;' }],
+  }]), { ok: false, findings: [{ path: otherPath, line: 1, kind: "ci" }] });
 });
 
 test("ignores machine values used outside the controlling side of a condition", () => {
@@ -88,6 +117,8 @@ test("ignores machine values used outside the controlling side of a condition", 
       { line: 3, text: "if (ready) return process.arch;" },
       { line: 4, text: "const result = ready && process.arch;" },
       { line: 5, text: "const value = ready ? process.env.SAMPLE : undefined;" },
+      { line: 6, text: "if (ready) { assert.equal(process.arch, expected); }" },
+      { line: 7, text: "ready && verify();" },
     ],
   }]), { ok: true, findings: [] });
 });
