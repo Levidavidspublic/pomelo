@@ -9,8 +9,10 @@ type Expression = { opener: string; start: number; ifStart?: number; isBlock?: b
 const pomeloTest = /^test\/pomelo-[^/\r\n]*\.test\.ts$/;
 const identifier = /^[$\p{ID_Start}][$\p{ID_Continue}\u200C\u200D]*$/u;
 const endOfExpression = /^(?:[$\p{ID_Continue}]+|["'].*|[)\]}])$/u;
+const literalValue = /^(?:["']|(?:[0-9]+|true|false|null)$)/;
 const expressionContinuations = new Set(["as", "in", "instanceof", "satisfies"]);
 const expressionSeparators = new Set([";", ",", "=", "=>", ":"]);
+const expressionTerminators = new Set([";", ",", ":", ")", "]", "}"]);
 const blockPrefixes = new Set(["", ";", "{", "}", ")", "=>", "else", "try", "catch", "finally", "do"]);
 const openerFor: Readonly<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
 
@@ -131,6 +133,18 @@ function machineKind(tokens: readonly Token[], index: number): MachineSkipKind |
   if (receiver === "process" || tokens[member.end]?.text === "(") return member.key;
 }
 
+function startsNewStatement(previous: Token, next: Token): boolean {
+  return previous.line !== next.line && identifier.test(next.text)
+    && !expressionContinuations.has(next.text) && endOfExpression.test(previous.text);
+}
+
+function hasLiteralFallback(tokens: readonly Token[], operatorIndex: number): boolean {
+  const value = tokens[operatorIndex + 1];
+  if (!value || !literalValue.test(value.text)) return false;
+  const next = tokens[operatorIndex + 2];
+  return !next || expressionTerminators.has(next.text) || startsNewStatement(value, next);
+}
+
 function scanChunk(path: string, tokens: readonly Token[], findings: MachineSkipFinding[]): void {
   const expressions: Expression[] = [{ opener: "", start: 0 }];
   const references: { line: number; kind: MachineSkipKind }[] = [];
@@ -145,11 +159,9 @@ function scanChunk(path: string, tokens: readonly Token[], findings: MachineSkip
     const { text, line } = token;
     const previous = tokens[index - 1];
     const expression = expressions[expressions.length - 1];
-    if ((!expression.opener || expression.opener === "{") && previous && previous.line !== line) {
+    if ((!expression.opener || expression.opener === "{") && previous && startsNewStatement(previous, token)) {
       // A new statement can follow an expression without a semicolon.
-      if (identifier.test(text) && !expressionContinuations.has(text) && endOfExpression.test(previous.text)) {
-        expression.start = references.length;
-      }
+      expression.start = references.length;
     }
 
     if (text === "(" || text === "[" || text === "{") {
@@ -165,7 +177,8 @@ function scanChunk(path: string, tokens: readonly Token[], findings: MachineSkip
       }
       expressions[expressions.length - 1].start = references.length;
     } else if (text === "&&" || text === "||" || text === "?") {
-      markCondition(expression.start);
+      // A literal fallback supplies a value without conditionally running code.
+      if (text !== "||" || !hasLiteralFallback(tokens, index)) markCondition(expression.start);
       expression.start = references.length;
     } else if (expressionSeparators.has(text)) {
       expression.start = references.length;
@@ -209,10 +222,13 @@ export function findMachineSkips(files: unknown): MachineSkipResult {
       if (!isRecord(added)) continue;
       const { line, text } = added;
       if (typeof line !== "number" || !Number.isSafeInteger(line) || line < 1 || typeof text !== "string") continue;
-      // Lexical state spans the file's additions. Conditions need contiguous code.
+      // An unchanged line may close a comment, string, or expression.
       if (line !== previousLine + 1) {
         scanChunk(file.path, tokens, findings);
         tokens = [];
+        state.inBlockComment = false;
+        state.quote = "";
+        state.templateBraces.length = 0;
       }
       scanLine(tokens, text, line, state);
       previousLine = line;
