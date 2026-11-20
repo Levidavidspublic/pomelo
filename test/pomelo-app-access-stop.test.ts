@@ -13,6 +13,7 @@ test("holds explicit account-access wording in English and Hebrew without an app
     { text: "The site is requesting permission to send notifications. The app is requesting permission to read your email." },
     { text: "האפליקציה מְבַקֶּשֶׁת גישה לחשבון שלך." },
     { text: "האפליקציה מבקשת הרשאה לקרוא את הדואר האלקטרוני שלך." },
+    { text: "האפליקציה מבקשת את ההרשאה לקרוא את הדואר האלקטרוני שלך." },
     { title: "אישור גישה" },
     { text: "פעולה זו תאפשר לאפליקציה לנהל את היומן שלך." },
   ]) {
@@ -45,6 +46,25 @@ test("holds when only the approval button's nearby text describes access", () =>
     const result = appAccessStop({ title: "Review", buttons: [{ label, nearbyText }] });
     assert.equal(result.action, "hold");
     assert.deepEqual(result.signals, ["access-wording", "allow-button"]);
+  }
+});
+
+test("holds page permission lists when approval button context is empty or unrelated", () => {
+  for (const [label, permissions, unrelated] of [
+    ["Allow", ["Read your email", "See your contacts"], "Cancel"],
+    ["אפשר", ["לקרוא את הדואר האלקטרוני שלך", "לראות את אנשי הקשר שלך"], "ביטול"],
+  ] as const) {
+    for (const nearbyText of ["", unrelated]) {
+      const buttons = [{ label, nearbyText }];
+      for (const read of [
+        { text: permissions.join("\n"), buttons },
+        { checkboxes: permissions.map((label) => ({ label, checked: false })), buttons },
+      ]) {
+        const result = appAccessStop(read);
+        assert.equal(result.action, "hold", JSON.stringify(read));
+        assert.deepEqual(result.signals, ["permission-list", "allow-button"]);
+      }
+    }
   }
 });
 
@@ -85,6 +105,7 @@ test("gives go on cookie, terms, account-chooser, and browser permission prompts
     { text: "This site is requesting permission to send notifications.", buttons: [{ label: "Allow" }] },
     { text: "לאפשר התראות?", buttons: [{ label: "אפשר" }, { label: "לא עכשיו" }] },
     { text: "האתר מבקש הרשאה לשלוח התראות.", buttons: [{ label: "אפשר" }] },
+    { text: "האתר מבקש את ההרשאה לשלוח התראות.", buttons: [{ label: "אפשר" }] },
     { text: "פעולה זו תאפשר לאתר לשלוח לך התראות.", buttons: [{ label: "אפשר" }] },
   ];
   for (const read of reads) {
@@ -113,6 +134,29 @@ test("uses explicit button context when unrelated page text lists permissions", 
     items: ['[1] button "Allow"'],
   });
   assert.equal(result.action, "go");
+});
+
+test("defers approval buttons with explicit context for other prompts in English and Hebrew", () => {
+  for (const [text, label, nearbyText] of [
+    ["Read your email", "Allow", "We use cookies."],
+    ["Read your email", "Allow", "Allow cookies?"],
+    ["Read your email", "Continue", "Terms of Service"],
+    ["Read your email", "Continue", "By continuing, you agree to the Terms of Service."],
+    ["לקרוא את המייל שלך", "אפשר", "אנו משתמשים בעוגיות."],
+    ["לקרוא את המייל שלך", "אפשר", "לאפשר עוגיות?"],
+    ["לקרוא את המייל שלך", "המשך", "תנאי השימוש"],
+    ["לקרוא את המייל שלך", "אפשר", "לאפשר התראות?"],
+  ]) {
+    const result = appAccessStop({ text, buttons: [{ label, nearbyText }] });
+    assert.equal(result.action, "go", nearbyText);
+    assert.deepEqual(result.signals, []);
+  }
+});
+
+test("holds when approval button context lists account permissions alongside another prompt", () => {
+  const result = appAccessStop({ buttons: [{ label: "Allow", nearbyText: "Allow notifications?\nRead your email" }] });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.signals, ["permission-list", "allow-button"]);
 });
 
 test("holds unreadable or wrongly typed masked reads", () => {

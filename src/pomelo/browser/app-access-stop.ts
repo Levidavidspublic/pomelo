@@ -31,13 +31,22 @@ const ACCOUNT_REQUEST = [
 const PERMISSION_REQUEST = [
   /\b(?:requesting|asking for|requests?) (?:your )?permissions? to ([^.!?]+)/g,
   /\bthis will allow (?!you\b|us\b|them\b)[^.!?:]{1,80}? to ([^.!?]+)/g,
-  /(?:מבקש(?:ת|ים|ות)?|מנסה לקבל) (?:את )?(?:ה?רשאה|רשות) (ל[^.!?]+)/gu,
+  /(?:מבקש(?:ת|ים|ות)?|מנסה לקבל) (?:את )?(?:ה?הרשאה|רשות) (ל[^.!?]+)/gu,
   /תאפשר ל(?!ך |נו |הם |הן )[^.!?:]{1,80}? (ל[^.!?]+)/gu,
 ];
 const NON_ACCOUNT_SCOPE = [
   /^(?:(?:send|show|display|receive|enable|allow) (?:you )?(?:push )?notifications|(?:set|use|store|place|accept) (?:optional |necessary )?cookies)\b/,
   /^(?:(?:access|use) (?:your |the )?(?:camera|microphone|(?:current )?location|clipboard)|(?:continue|accept (?:our |the )?terms))\b/,
   /^(?:ל(?:שלוח|הציג|קבל|אפשר) (?:לך )?התראות|להשתמש (?:בעוגיות|ב(?:מצלמה|מיקרופון|מיקום|לוח))|לגשת ל(?:מצלמה|מיקרופון|מיקום)|להמשיך|לאשר את התנאים)(?:$|[\s.!?])/u,
+];
+const NON_ACCOUNT_PROMPT = [
+  /^(?:(?:allow|enable) (?:push )?notifications|(?:this|the) (?:site|website) is requesting permission to (?:send|show|display) (?:push )?notifications)\b/,
+  /^(?:(?:we use|this (?:site|website) uses|allow|accept) (?:all |optional |necessary )?cookies|cookie (?:consent|preferences|settings))\b/,
+  /^(?:(?:new|updated|revised) terms|terms (?:of (?:service|use)|(?:and|&) conditions))$/,
+  /^(?:please |by continuing,? you )?(?:accept|agree to) (?:our |the |these )?terms\b/,
+  /^(?:(?:אפשר|לאפשר|הפעלת) התראות|(?:האתר|אתר זה) מבקש(?: את)? ה?הרשאה ל(?:שלוח|הציג) התראות)(?:$|[\s.!?])/u,
+  /^(?:(?:אנו משתמשים|האתר משתמש) בעוגיות|(?:אפשר|לאפשר|הגדרות|העדפות) עוגיות)(?:$|[\s.!?])/u,
+  /^(?:תנאי (?:השימוש|השירות)|תנאים והגבלות)(?: מעודכנים)?$|^(?:יש )?(?:לאשר את התנאים|להסכים לתנאי (?:השימוש|השירות))(?:$|[\s.!?])/u,
 ];
 const AUTHORIZE_APP = /^(?:please )?authori[sz]e (?!(?:(?:this|the|your) )?(?:access|cookies|notifications|payments?|devices?|sign[ -]in|terms)\b)["'“‘]?[\p{L}\p{N}•][^.!?:]{0,79}$/u;
 const ALLOW_BUTTON = [
@@ -130,12 +139,13 @@ export function appAccessStop(read?: unknown): AppAccessDecision {
     const normalized = normalize(label);
     return AUTHORIZE_APP.test(normalized) || ALLOW_BUTTON.some((pattern) => pattern.test(normalized));
   });
-  const pagePermissions = [...pageWording, ...checkboxLabels];
-  // A scoped button can be on the same page as unrelated settings or a separate prompt.
-  const permissionsWithApproval = approvalButtons.some(({ label, nearbyText }) =>
-    hasAccountPermission(normalize(label)) || (nearbyText === undefined
-      ? pagePermissions.some(hasAccountPermission)
-      : hasAccountPermission(normalize(nearbyText))));
+  const pageHasPermissions = [...pageWording, ...checkboxLabels].some(hasAccountPermission);
+  // Fall back to page permissions unless the button belongs to a distinct prompt.
+  const permissionsWithApproval = approvalButtons.some(({ label, nearbyText = "" }) => {
+    const context = normalize(nearbyText);
+    return hasAccountPermission(normalize(label)) || hasAccountPermission(context)
+      || (pageHasPermissions && !NON_ACCOUNT_PROMPT.some((pattern) => pattern.test(context)));
+  });
 
   if (!accessWording && !permissionsWithApproval) {
     return { action: "go", reason: "No app access request was found.", signals: [] };
