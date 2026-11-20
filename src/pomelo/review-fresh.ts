@@ -103,7 +103,7 @@ export function reviewFreshness(input: unknown): ReviewFreshnessResult {
         openRequests.add(reviewer);
         break;
       case "DISMISSED":
-        openRequests.delete(reviewer);
+      case "COMMENTED":
         break;
     }
   }

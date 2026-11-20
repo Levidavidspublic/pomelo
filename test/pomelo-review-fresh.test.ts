@@ -68,14 +68,16 @@ test("a later head approval clears the same reviewer's change request", () => {
   assert.equal(result.verdict, "fresh");
 });
 
-test("a dismissal clears a request while another reviewer's approval supplies freshness", () => {
+test("a dismissal leaves an open change request blocking another reviewer's approval", () => {
   const dismissal = { ...request, state: "DISMISSED", submittedAt: "2026-11-18T11:00:00Z" };
+  const otherApproval = { ...approval, reviewer: "reviewer-two", submittedAt: "2026-11-18T12:00:00Z" };
   const result = reviewFreshness({
     headSha,
-    reviews: [request, dismissal, { ...approval, reviewer: "reviewer-two" }],
+    reviews: [request, dismissal, otherApproval],
   });
-  assert.equal(result.ok, true);
-  assert.equal(result.verdict, "fresh");
+  assert.equal(result.ok, false);
+  assert.equal(result.verdict, "none");
+  assert.ok(result.reasons.some((reason) => /reviewer-one.*open change request/i.test(reason)));
 });
 
 test("submission order is independent of array order and input is left intact", () => {
