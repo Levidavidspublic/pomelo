@@ -8,6 +8,8 @@ export interface PersonalDetailsField {
   readonly autocomplete?: string;
   readonly required?: boolean;
   readonly value?: string | null;
+  /** True when the masked read confirms that a birth-date select already contains an answer. */
+  readonly hasAnswer?: boolean;
 }
 
 export interface PersonalDetailsPageRead {
@@ -27,7 +29,7 @@ export interface PersonalDetailsDecision {
 const AGE_CONFIRMATION = /\b(?:are you|i am|i['’]m|confirm (?:that )?you are|you must be) (?:(?:at least|over|older than|under|aged?) \d{2}\b|\d{2}(?:\+| years? (?:old|of age)\b| or (?:older|over)\b|[.!?]?$|\?))|(?:אני|האם את(?:ה|ם|ן)?) (?:מעל גיל|בגיל) \d{2}\b/u;
 const BIRTH_YEAR_PROMPT = /\b(?:enter|select|choose) (?:your |the )?(?:birth year|year of birth)\b/;
 const AGE_LABEL = /^(?:age (?:check|gate|verification)|verify your age|confirm your age|אימות גיל|בדיקת גיל)[.!?:]*$/u;
-const ID_LABEL = /\b(?:national[ -]+(?:id|identification)(?:[ -]+(?:no\.?|number))?|(?:id|identification)[ -]+(?:no\.?|number)|passport(?:[ -]+(?:no\.?|number))?)\b|תעודת זהות|(?:^|[^\p{L}\p{N}])ת\s*[.״׳"']\s*ז(?:$|[^\p{L}\p{N}])/u;
+const ID_LABEL = /\b(?:national[ -]+(?:id|identification|identity)|(?:id|identification|identity)[ -]+(?:card[ -]+)?(?:no\.?|number)|passport(?:[ -]+(?:no\.?|number))?)\b|תעודת זהות|(?:^|[^\p{L}\p{N}])ת\s*[.״׳"']\s*ז(?:$|[^\p{L}\p{N}])/u;
 const BIRTH_LABEL = /\b(?:date[ -]+of[ -]+birth|birth[ -]*(?:date|day|month|year)|year[ -]+of[ -]+birth|d\.?o\.?b)\b|תאריך לידה|שנת לידה/u;
 const PHONE_LABEL = /\b(?:phone|telephone|cellphone|mobile number)\b|טלפון/u;
 const ADDRESS_LABEL = /\b(?:(?:street|home|residential|postal|mailing|shipping|billing) address|address(?: line)? [12]|street (?:name|number)|post[ -]*code|postal[ -]*code|zip(?:[ -]*code)?)\b|^(?:address|street)[\s:*]*$|כתובת מגורים|מיקוד/u;
@@ -69,7 +71,8 @@ function isPageRead(value: unknown): value is PersonalDetailsPageRead {
     && (value.text === undefined || isString(value.text))
     && isList(value.fields, (field) => isRecord(field)
       && [field.label, field.type, field.autocomplete].every((fact) => fact === undefined || isString(fact))
-      && (field.required === undefined || typeof field.required === "boolean"))
+      && (field.required === undefined || typeof field.required === "boolean")
+      && (field.hasAnswer === undefined || typeof field.hasAnswer === "boolean"))
     && isList(value.buttons, (button) => isString(button) || (isRecord(button) && isString(button.label)))
     && isList(value.items, isString);
 }
@@ -78,8 +81,8 @@ type FieldKind = Exclude<PersonalDetailKind, "age-check"> | "search" | "email" |
 
 function fieldKind(label: string, type: string, hint: string | undefined): FieldKind | undefined {
   if (type === "search" || SEARCH_LABEL.test(label)) return "search";
-  if (hint === "one-time-code" || hint?.startsWith("cc-") || SECRET_LABEL.test(label)) return "typed-secret";
   if (ID_LABEL.test(label)) return "id-number";
+  if (hint === "one-time-code" || hint?.startsWith("cc-") || SECRET_LABEL.test(label)) return "typed-secret";
   if (/^bday(?:-day|-month|-year)?$/.test(hint ?? "") || BIRTH_LABEL.test(label)) return "date-of-birth";
   if (/^(?:street-address|address-line[1-3]|postal-code)$/.test(hint ?? "") || ADDRESS_LABEL.test(label)) return "address";
   if (/^tel(?:-[a-z]+)*$/.test(hint ?? "") || PHONE_LABEL.test(label)) return "phone";
@@ -128,6 +131,11 @@ export function personalDetailsStop(pageRead?: unknown): PersonalDetailsDecision
       if (field.required === false || (field.required === undefined && OPTIONAL_LABEL.test(label))) continue;
       const requested = requestedKind(label, kind);
       if (!requested) continue;
+      // A dropdown can report a nonempty default option before anyone answers.
+      if (type === "select" && (requested === "date-of-birth" || requested === "age-check")) {
+        if (field.hasAnswer !== true) kinds.add(requested);
+        continue;
+      }
       const value = field.value;
       if (value != null && !isString(value)) return unreadable;
       if (value == null || !/\S/.test(value)) kinds.add(requested);

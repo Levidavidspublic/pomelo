@@ -4,7 +4,10 @@ import { personalDetailsStop } from "../src/pomelo/browser/personal-details-stop
 
 const requiredField = { type: "text", required: true, value: "" };
 
-for (const label of ["ID number", "Passport number", "תעודת זהות", "ת.ז", "  ＩＤ   ＮＵＭＢＥＲ  "]) {
+for (const label of [
+  "ID number", "Passport number", "תעודת זהות", "ת.ז", "  ＩＤ   ＮＵＭＢＥＲ  ",
+  "National ID card number", "Identity card number", "Identity number",
+]) {
   test(`holds for a required empty ${label} field`, () => {
     const result = personalDetailsStop({ fields: [{ ...requiredField, label }] });
     assert.equal(result.action, "hold");
@@ -18,6 +21,35 @@ test("reports one date-of-birth kind for day, month and year selects", () => {
     ...requiredField, type: "select", label: `Date of birth (${part})`,
   }));
   assert.deepEqual(personalDetailsStop({ fields }).kinds, ["date-of-birth"]);
+});
+
+test("gives a national ID label priority over a card autocomplete hint", () => {
+  const result = personalDetailsStop({
+    fields: [{ ...requiredField, type: "tel", label: "National ID card number", autocomplete: "cc-number" }],
+  });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.kinds, ["id-number"]);
+});
+
+test("holds on required birth-date selects with unconfirmed options", () => {
+  for (const [field, kind] of [
+    [{ ...requiredField, type: "select", label: "Date of birth (year)", value: "Year" }, "date-of-birth"],
+    [{ ...requiredField, type: "select-one", autocomplete: "bday-day", value: "1" }, "date-of-birth"],
+    [{ ...requiredField, type: "select", label: "Enter your birth year", value: "Year" }, "age-check"],
+  ] as const) {
+    const result = personalDetailsStop({ fields: [field] });
+    assert.equal(result.action, "hold");
+    assert.deepEqual(result.kinds, [kind]);
+  }
+});
+
+test("lets an optional or confirmed birth-date select pass", () => {
+  const field = { type: "select", label: "Date of birth (year)" };
+  for (const fields of [[{ ...field, required: false }], [{ ...field, required: true, hasAnswer: true }]]) {
+    const result = personalDetailsStop({ fields });
+    assert.equal(result.action, "go");
+    assert.deepEqual(result.kinds, []);
+  }
 });
 
 for (const [autocomplete, kind] of [
