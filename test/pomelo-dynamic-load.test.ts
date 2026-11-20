@@ -64,6 +64,50 @@ test("rejects template paths and worker URLs with a computed path or base", () =
   assert.deepEqual(findings.map(({ line }) => line), [1, 2, 3, 4, 5, 6]);
 });
 
+test("checks optional calls and optional member access", () => {
+  const findings = dynamicLoadGuard([changed(server,
+    "require?.(name);",
+    "import.meta.resolve?.(path);",
+    "vm?.runInNewContext(source);",
+    "vm?.runInThisContext?.(source);",
+    "module?.register?.(path);",
+    "createRequire?.(import.meta.url);",
+    'require?.("node:path");',
+    'import.meta.resolve?.("./a.js");',
+    "loader?.require?.(path);",
+  )]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 1, rule: "dynamic-require" },
+    { line: 2, rule: "dynamic-resolve" },
+    { line: 3, rule: "vm-run-in" },
+    { line: 4, rule: "vm-run-in" },
+    { line: 5, rule: "module-register" },
+    { line: 6, rule: "create-require" },
+  ]);
+});
+
+test("checks workers constructed through browser globals", () => {
+  const findings = dynamicLoadGuard([changed(client,
+    "new window.Worker(path);",
+    "new self.Worker(path);",
+    "new globalThis.Worker(path);",
+    "new window.SharedWorker(path);",
+    "new self.SharedWorker(path);",
+    "new globalThis.SharedWorker(path);",
+    'new window.Worker(new URL("./w.js", import.meta.url));',
+    'new self.SharedWorker("./w.js", options);',
+    'new globalThis.Worker("./w.js");',
+  )]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 1, rule: "dynamic-worker" },
+    { line: 2, rule: "dynamic-worker" },
+    { line: 3, rule: "dynamic-worker" },
+    { line: 4, rule: "dynamic-worker" },
+    { line: 5, rule: "dynamic-worker" },
+    { line: 6, rule: "dynamic-worker" },
+  ]);
+});
+
 test("ignores comments, strings and unrelated calls but checks executable template expressions", () => {
   const findings = dynamicLoadGuard([changed(server,
     "// import(path);",
@@ -81,6 +125,19 @@ test("ignores comments, strings and unrelated calls but checks executable templa
   assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
     { line: 3, rule: "dynamic-import" },
     { line: 6, rule: "dynamic-import" },
+  ]);
+});
+
+test("checks loads in division expressions after postfix operators", () => {
+  const findings = dynamicLoadGuard([changed(server,
+    "i++ / (await import(path), 1) / 1;",
+    "i-- / (await import(path), 1) / 1;",
+    "const pattern = /import(path)/;",
+    "i + /require(path)/.source.length;",
+  )]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 1, rule: "dynamic-import" },
+    { line: 2, rule: "dynamic-import" },
   ]);
 });
 
@@ -102,18 +159,28 @@ test("joins consecutive added lines and reports the line where the call begins",
   ]);
 });
 
-test("ignores Friday code, test files, and exact allow-listed paths", () => {
+test("ignores Friday code, the test suite, and exact allow-listed paths", () => {
   const load = "import(path);";
   const findings = dynamicLoadGuard([
     changed("src/runner/worker.ts", load),
     changed("src/pomelo-extra/worker.ts", load),
     changed("test/worker.test.ts", load),
-    changed("src/pomelo/worker.test.ts", load),
-    changed("src/client/pomelo/__tests__/worker.ts", load),
     changed(server, load),
     changed(client, load),
   ], [server]);
   assert.deepEqual(findings.map(({ path }) => path), [client]);
+});
+
+test("checks Pomelo source paths with test-like names", () => {
+  const paths = [
+    "src/client/pomelo/__tests__/worker.ts",
+    "src/pomelo/test/real.ts",
+    "src/pomelo/worker.spec.ts",
+    "src/pomelo/worker.test.ts",
+  ];
+  const findings = dynamicLoadGuard(paths.map((path) => changed(path, "import(path);")));
+  assert.deepEqual(findings.map(({ path, line, rule }) => ({ path, line, rule })),
+    paths.map((path) => ({ path, line: 1, rule: "dynamic-import" })));
 });
 
 test("sorts by path, numeric line and rule, and reports each rule once per line", () => {

@@ -33,13 +33,18 @@ const LOADERS: readonly {
   { rule: "dynamic-resolve", callee: ["import", ".", "meta", ".", "resolve"], pathArgument: "single" },
   { rule: "dynamic-worker", callee: ["new", "Worker"], pathArgument: "worker" },
   { rule: "dynamic-worker", callee: ["new", "SharedWorker"], pathArgument: "worker" },
+  { rule: "dynamic-worker", callee: ["new", "window", ".", "Worker"], pathArgument: "worker" },
+  { rule: "dynamic-worker", callee: ["new", "window", ".", "SharedWorker"], pathArgument: "worker" },
+  { rule: "dynamic-worker", callee: ["new", "self", ".", "Worker"], pathArgument: "worker" },
+  { rule: "dynamic-worker", callee: ["new", "self", ".", "SharedWorker"], pathArgument: "worker" },
+  { rule: "dynamic-worker", callee: ["new", "globalThis", ".", "Worker"], pathArgument: "worker" },
+  { rule: "dynamic-worker", callee: ["new", "globalThis", ".", "SharedWorker"], pathArgument: "worker" },
   { rule: "vm-run-in", callee: ["vm", ".", "runInNewContext"] },
   { rule: "vm-run-in", callee: ["vm", ".", "runInThisContext"] },
   { rule: "vm-script", callee: ["new", "vm", ".", "Script"] },
 ];
 
-const TEST_PATH = /(?:^|\/)(?:test|tests|__tests__)\/|\.(?:test|spec)\.[^/]+$/;
-const CODE_TOKEN = /(?<trivia>\s+|\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?(?:\*\/|$))|(?<quoted>"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n])*"|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n])*')|["'][^\r\n]*|[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*|=>|\?\.|[\s\S]/uy;
+const CODE_TOKEN = /(?<trivia>\s+|\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?(?:\*\/|$))|(?<quoted>"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n])*"|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n])*')|["'][^\r\n]*|[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*|=>|\?\.|\+\+|--|[\s\S]/uy;
 const TEMPLATE_TOKEN = /\\[\s\S]|\$\{|`|[^\\`$]+|[\s\S]/y;
 const REGEX_LITERAL = /\/(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\\[\r\n])+\/[a-z]*/y;
 const REGEX_PREFIX = /^(?:[=(:,;!&|?~+*%^{\[]|=>|return|throw|case|typeof|void|yield)$/;
@@ -98,8 +103,11 @@ function tokenize(source: string, firstLine: number): Token[] {
   return tokens;
 }
 
-function matches(tokens: readonly Token[], start: number, sequence: readonly string[]): boolean {
-  return sequence.every((text, index) => tokens[start + index]?.text === text);
+function matches(tokens: readonly Token[], start: number, sequence: readonly string[], optionalAccess = false): boolean {
+  return sequence.every((text, index) => {
+    const actual = tokens[start + index]?.text;
+    return actual === text || (optionalAccess && text === "." && actual === "?.");
+  });
 }
 
 function endsCall(tokens: readonly Token[], index: number): boolean {
@@ -126,8 +134,9 @@ function checkRun(tokens: readonly Token[], path: string, findings: Finding[]): 
     const isProperty = previous === "." || previous === "?.";
     for (const { rule, callee, pathArgument } of LOADERS) {
       if (isProperty && rule !== "create-require") continue;
-      if (!matches(tokens, index, callee)) continue;
-      const open = index + callee.length;
+      if (!matches(tokens, index, callee, true)) continue;
+      let open = index + callee.length;
+      if (tokens[open]?.text === "?.") open++;
       if (tokens[open]?.text !== "(") continue;
 
       const arg = open + 1;
@@ -155,7 +164,7 @@ export function dynamicLoadGuard(files: readonly ChangedFile[], allow: readonly 
 
   for (const { path, added } of files) {
     if (!path.startsWith("src/pomelo/") && !path.startsWith("src/client/pomelo/")) continue;
-    if (allowedPaths.has(path) || TEST_PATH.test(path)) continue;
+    if (allowedPaths.has(path)) continue;
 
     const lines = [...added].sort((a, b) => a.line - b.line);
     // A gap can conceal either a closing comment or intervening code.
