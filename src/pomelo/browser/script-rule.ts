@@ -1,12 +1,13 @@
 export type PageScriptDecision = "allow" | "hold" | "refuse";
 
 const REFUSAL_RULES = [
-  ["cookies",
-    /\bcookieStore\b/u,
-    /\bdocument\s*(?:\??\.\s*cookie\b|(?:\?\.\s*)?\[\s*["'`]cookie["'`]\s*\])/u,
-  ],
+  ["cookies", /\b(?:cookie|cookieStore)\b/u],
   ["storage", /\b(?:localStorage|sessionStorage|indexedDB)\b/u],
-  ["field-value", /\.\s*value\b|\[\s*["'`]value["'`]\s*\]|\bFormData\b/u],
+  ["field-value",
+    /\.\s*value\b|\[\s*["'`]value["'`]\s*\]|\bFormData\b/u,
+    // A bare or quoted property name can read a field through destructuring.
+    /[{,]\s*(?:value|(["'])value\1)\s*(?=[:=,}])/u,
+  ],
   ["network",
     /\b(?:fetch|XMLHttpRequest|sendBeacon|WebSocket|EventSource)\b/u,
     /(?:\.\s*(?:src|href)\b|\blocation\b|\[\s*["'`](?:src|href|location)["'`]\s*\])\s*(?:=(?!=|>)|(?:[-+*/%&|^]|\*\*|&&|\|\||\?\?|<<|>>>?)=|\+\+|--)/u,
@@ -73,10 +74,13 @@ function stripComments(script: string): { source: string; code: string; unclear:
     source += token;
     if (inTemplate) {
       if (token === "`") inTemplate = false;
-      if (token === "${") {
+      else if (token === "${") {
         interpolationDepths.push(1);
         inTemplate = false;
         code += " {";
+      } else if (IDENTIFIER_ESCAPE.test(token)) {
+        // An escaped template key needs review just like an escaped quoted key.
+        code += " escaped";
       }
     } else if (match.groups?.quoted) {
       // A plain literal bracket key is static. Review escaped keys without decoding them.

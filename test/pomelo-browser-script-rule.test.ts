@@ -3,9 +3,16 @@ import test from "node:test";
 import { checkPageScript } from "../src/pomelo/browser/script-rule.js";
 
 for (const [reason, scripts] of Object.entries({
-  cookies: ["document.cookie", "document?.['cookie']", "cookieStore.get('example')"],
+  cookies: [
+    "document.cookie", "document?.['cookie']", "cookieStore.get('example')",
+    "(document).cookie", "const d = document; d.cookie", "const { cookie } = document",
+  ],
   storage: ["localStorage.length", "window.sessionStorage.length", "indexedDB.databases()"],
-  "field-value": ["field.value", 'field["value"]', "new FormData(form)"],
+  "field-value": [
+    "field.value", 'field["value"]', "new FormData(form)", "const { value } = field",
+    "const { id, value: text } = field", 'const { "value": text } = field',
+    "const { value = '' } = field",
+  ],
   network: [
     "fetch(target)", "new XMLHttpRequest()", "navigator.sendBeacon(target)",
     "new WebSocket(target)", "new EventSource(target)",
@@ -23,7 +30,10 @@ for (const [reason, scripts] of Object.entries({
 }
 
 test("holds computed keys on browser globals", () => {
-  for (const script of ["document['coo' + 'kie']", "window[key]", "globalThis?.[key]", "navigator[method()]"]) {
+  for (const script of [
+    "document['coo' + 'kie']", "window[key]", "globalThis?.[key]", "navigator[method()]",
+    "document[`\\u0063ookie`]", "window?.[`\\x74itle`]", "document[`ti${suffix}`]",
+  ]) {
     assert.deepEqual(checkPageScript(script), { decision: "hold", reasons: ["computed-key"] });
   }
 });
@@ -58,6 +68,7 @@ test("holds non-text input and refuses empty text", () => {
 test("allows ordinary page reads, scrolling, and function timers", () => {
   for (const script of [
     "document.title", "el.getBoundingClientRect()", "el.innerText", 'document[ "title" ]',
+    "document[`title`]", "`\\u05e9`", "const value = document.title; value",
     "window.scrollTo(0, 500)", "el.href === target", "setTimeout(() => window.scrollTo(0, 500), 0)",
     String.raw`"\u05e9"`,
   ]) {
