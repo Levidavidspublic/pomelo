@@ -55,19 +55,24 @@ export function takeoverStep(state: TakeoverState, event: TakeoverEvent, now: nu
   );
   const allow = { allow: true, next, mustReread };
 
-  if (!Number.isFinite(now) || (takenAt !== undefined && now < takenAt)
-    || (handedBackAt !== undefined && now < handedBackAt)) {
-    return refuse("Invalid browser event time");
+  const lastControlChangeAt = handedBackAt ?? takenAt;
+  const validTime = Number.isFinite(now) && (lastControlChangeAt === undefined || now >= lastControlChangeAt);
+  if (event?.type === "amit_take_over") {
+    if (driver === "amit") return allow;
+    // Manual control starts immediately. Keep the last known timestamp if the clock is unreliable.
+    const takeoverAt = validTime ? now : lastControlChangeAt;
+    return {
+      allow: true,
+      next: { driver: "amit", ...(takeoverAt === undefined ? {} : { takenAt: takeoverAt }), pageChangedSinceTakeOver },
+      mustReread: false,
+    };
   }
+  if (driver === "amit" && (event?.type === "agent_action" || event?.type === "agent_reread")) {
+    return refuse("Amit is driving");
+  }
+  if (!validTime) return refuse("Invalid browser event time");
 
   switch (event?.type) {
-    case "amit_take_over":
-      if (driver === "amit") return allow;
-      return {
-        allow: true,
-        next: { driver: "amit", takenAt: now, pageChangedSinceTakeOver },
-        mustReread: false,
-      };
     case "amit_hand_back":
       if (driver === "agent") return allow;
       return {
@@ -78,7 +83,6 @@ export function takeoverStep(state: TakeoverState, event: TakeoverEvent, now: nu
     case "amit_input":
       return driver === "amit" ? allow : refuse("Amit is not driving");
     case "agent_action":
-      if (driver === "amit") return refuse("Amit is driving");
       if (!AGENT_ACTIONS.includes(event.kind)) return refuse("Unknown browser event");
       if (mustReread) return refuse("Read the masked page again");
       if ((event.kind === "fill" || event.kind === "import") && handedBackAt !== undefined) {
@@ -89,9 +93,8 @@ export function takeoverStep(state: TakeoverState, event: TakeoverEvent, now: nu
       }
       return allow;
     case "agent_reread":
-      if (driver === "amit") return refuse("Amit is driving");
-      if (handedBackAt === undefined || !Number.isFinite(event.startedAt)
-        || event.startedAt <= handedBackAt || event.startedAt > now) {
+      if (!Number.isFinite(event.startedAt) || event.startedAt > now
+        || (lastControlChangeAt !== undefined && event.startedAt <= lastControlChangeAt)) {
         return refuse("Read the masked page again");
       }
       return { allow: true, next: { ...next, pageChangedSinceTakeOver: false }, mustReread: false };

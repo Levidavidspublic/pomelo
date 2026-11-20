@@ -34,6 +34,39 @@ test("a duplicate take-over preserves the original time and any page change", ()
   assert.notEqual(duplicate.next, changed);
 });
 
+test("an invalid or regressed time cannot prevent take-over", () => {
+  const taken = takeoverStep(initial, takeOver, 20).next;
+  const returned = takeoverStep(taken, handBack, 30).next;
+  for (const now of [25, NaN, Infinity]) {
+    const retaken = takeoverStep(returned, takeOver, now);
+    assert.deepEqual(retaken, {
+      allow: true, next: { driver: "amit", takenAt: 30, pageChangedSinceTakeOver: false }, mustReread: false,
+    });
+    assert.deepEqual(takeoverStep(retaken.next, takeOver, now), retaken);
+    assert.equal(takeoverStep(retaken.next, handBack, 29).allow, false);
+    assert.equal(takeoverStep(retaken.next, click, 31).hold, "Amit is driving");
+    assert.equal(takeoverStep(retaken.next, handBack, 35).allow, true);
+  }
+
+  const firstTakeOver = takeoverStep(initial, takeOver, NaN);
+  assert.deepEqual(firstTakeOver, {
+    allow: true, next: { driver: "amit", pageChangedSinceTakeOver: false }, mustReread: false,
+  });
+  assert.equal(takeoverStep(firstTakeOver.next, handBack, 30).allow, true);
+});
+
+test("reports that Amit is driving even when an agent event has an invalid time", () => {
+  const taken = takeoverStep(initial, takeOver, 20).next;
+  const reread = { type: "agent_reread", startedAt: 19 } as const;
+  for (const event of [click, reread]) {
+    for (const now of [19, NaN]) {
+      assert.deepEqual(takeoverStep(taken, event, now), {
+        allow: false, hold: "Amit is driving", next: taken, mustReread: false,
+      });
+    }
+  }
+});
+
 test("hands an unchanged page back to the agent", () => {
   const taken = takeoverStep(initial, takeOver, 20).next;
   const returned = takeoverStep(taken, handBack, 30);
@@ -68,6 +101,22 @@ test("blocks agent actions until a fresh masked read after hand-back", () => {
   assert.equal(reread.mustReread, false);
   assert.equal(reread.next.pageChangedSinceTakeOver, false);
   assert.equal(takeoverStep(reread.next, click, 34).allow, true);
+});
+
+test("accepts a masked read without a recorded hand-back", () => {
+  const changed = { ...initial, pageChangedSinceTakeOver: true };
+  const reread = { type: "agent_reread", startedAt: 20 } as const;
+  assert.deepEqual(takeoverStep(initial, reread, 21), { allow: true, next: initial, mustReread: false });
+  assert.equal(takeoverStep(changed, click, 19).allow, false);
+  for (const startedAt of [NaN, 22]) {
+    const refused = takeoverStep(changed, { ...reread, startedAt }, 21);
+    assert.equal(refused.allow, false);
+    assert.equal(refused.mustReread, true);
+    assert.deepEqual(refused.next, changed);
+  }
+  const result = takeoverStep(changed, reread, 21);
+  assert.deepEqual(result, { allow: true, next: initial, mustReread: false });
+  assert.equal(takeoverStep(result.next, click, 22).allow, true);
 });
 
 test("preserves the fresh-read requirement across another take-over", () => {
