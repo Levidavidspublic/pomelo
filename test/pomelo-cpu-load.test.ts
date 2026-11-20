@@ -28,16 +28,26 @@ test("load above the stop limit on both averages stops the run", () => {
   assert.deepEqual(result.loadPerCore, { oneMinute: 2.25, fiveMinute: 2.5 });
 });
 
-test("a one-minute spike defers workers without stopping the run", () => {
-  const result = cpuLoad("9.00 0.25 0.70 2/345 12345", "4");
+test("a one-minute spike with a calm five-minute load fits workers", () => {
+  const result = cpuLoad("9.00 0.25 0.70 2/345 12345", "4", { workersWanted: 4 });
   assert.equal(result.verdict, "fewer");
-  assert.equal(result.workersThatFit, 0);
+  assert.equal(result.workersThatFit, 3);
+  assert.deepEqual(result.loadPerCore, { oneMinute: 2.25, fiveMinute: 0.0625 });
 });
 
-test("a reading equal to the stop limit does not trigger a stop", () => {
-  const result = cpuLoad("9.00 8.00 0.70 2/345 12345", "4");
+test("a reading equal to the stop limit can still admit workers", () => {
+  const result = cpuLoad("2.00 2.50 0.70 2/345 12345", "4", { workersWanted: 4, stopAbovePerCore: 0.5 });
   assert.equal(result.verdict, "fewer");
-  assert.equal(result.workersThatFit, 0);
+  assert.equal(result.workersThatFit, 1);
+});
+
+test("the run stops when there is too little CPU capacity for one worker", () => {
+  for (const loadavgText of ["7.90 7.90 0.70 2/345 12345", "9.00 8.00 0.70 2/345 12345"]) {
+    const result = cpuLoad(loadavgText, "4");
+    assert.equal(result.verdict, "stop");
+    assert.equal(result.workersThatFit, 0);
+    assert.match(result.reason, /too low for one worker/);
+  }
 });
 
 test("an idle single core fits one worker", () => {
