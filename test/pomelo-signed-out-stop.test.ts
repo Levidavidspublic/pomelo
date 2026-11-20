@@ -79,6 +79,32 @@ test("waits for the broker when a masked password appears with an English or Heb
   }, context, hold);
 });
 
+test("reads an items-only desktop sign-in form off the login path", () => {
+  const passwordItem = '[3] field:password "Password"';
+  const desktopRead = {
+    title: page.title,
+    url: page.url,
+    text: page.text,
+    cut: false,
+    items: [passwordItem, '[4] button "Log in"'],
+  } satisfies SignedOutPageRead;
+  const hold = { state: "hold_for_broker", reason: "sign_in_form" } as const;
+  check(desktopRead, context, hold, ["Password", "Log in"]);
+  check({
+    ...desktopRead,
+    items: [passwordItem, '[4] field:submit "Log in" = Log in'],
+  }, context, hold, ["Password", "Log in"]);
+  check({
+    ...desktopRead,
+    text: `${desktopRead.text}\nSign up`,
+    items: [...desktopRead.items, `[5] link "Sign up" → ${origin}/signup?${query}`],
+  }, context, hold, ["Password", "Log in"]);
+  check({
+    ...desktopRead,
+    items: [passwordItem, '[4] field:submit "Continue" = Log in'],
+  }, context, { state: "go", reason: "no_sign_in" }, ["Password", "Continue", "Log in"]);
+});
+
 test("waits when the session ended even without a password field", () => {
   const hold = { state: "hold_for_broker", reason: "session_ended" } as const;
   check({ ...page, text: `Your session has expired. Please reload.\n${canary}` }, context, hold);
@@ -122,6 +148,24 @@ test("holds sign-up and password changes for Amit even when a login cue is prese
     url: `${origin}/account/change-password?${query}`,
     fields: [password],
   }, context, hold);
+});
+
+test("holds when either snapshot format shows multiple password fields", () => {
+  const passwordItem = '[1] field:password "Password"';
+  const hold = { state: "hold_for_amit", reason: "account_form" } as const;
+  check({
+    ...page,
+    fields: [password, password],
+  }, context, hold);
+  check({
+    title: page.title,
+    url: page.url,
+    text: page.text,
+    items: [passwordItem, '[2] field:password ""', '[3] button "Continue"'],
+  }, context, hold, ["Password", "Continue"]);
+  check({ ...signIn, items: [passwordItem] }, context, {
+    state: "hold_for_broker", reason: "sign_in_form",
+  }, ["Password"]);
 });
 
 test("returns a fixed hold for missing or malformed inputs and unmasked password data", () => {

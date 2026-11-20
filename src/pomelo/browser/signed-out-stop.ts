@@ -53,7 +53,8 @@ for (const patterns of Object.values(SIGNED_OUT_WORDS)) {
 const badInput = Object.freeze({ state: "hold_for_amit", reason: "bad_input" } as const);
 const signInPath = /(?:^|\/)(?:log-?in|sign-?in)(?:\/|$)/i;
 const accountFormPath = /(?:^|\/)(?:sign-?up|register|(?:change|reset)-password)(?:\/|$)/i;
-const pageItem = /^\[\d+\]\s+(button|field:submit|field:password|link)\s+"(.*)"$/i;
+// The desktop reader writes a JSON label, then an optional link target or input value.
+const pageItem = /^\[\d+\]\s+(button|field:submit|field:password|link)\s+("(?:[^"\\]|\\.)*")(?=$| [→=] )/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -93,7 +94,7 @@ export function signedOutStop(read: unknown, context: unknown): SignedOutStopRes
     const inScope = inJobScope(jobOrigins, url.origin);
     if (inScope === undefined) return badInput;
 
-    let hasPassword = false;
+    let passwordFields = 0;
     let hasNewPassword = false;
     for (const field of fields ?? []) {
       if (!isRecord(field)) return badInput;
@@ -104,31 +105,37 @@ export function signedOutStop(read: unknown, context: unknown): SignedOutStopRes
       const passwordName = typeof field.name === "string" && /^(?:password|passwd)$/i.test(field.name);
       if (!isNew && !isCurrent && !passwordType && !passwordName) continue;
       if (field.value !== MASK) return badInput;
-      hasPassword = true;
+      passwordFields++;
       hasNewPassword ||= isNew;
     }
 
     const formLabels = [title.trim()];
     const links = new Set<string>();
+    let passwordItems = 0;
     for (const item of items) {
       if (typeof item !== "string") return badInput;
       const match = pageItem.exec(item);
       if (!match) continue;
-      const kind = match[1]?.toLowerCase();
-      const label = match[2]!.trim();
+      const kind = match[1]!.toLowerCase();
       if (kind === "field:password") {
-        hasPassword ||= label === MASK;
-      } else if (kind === "link") {
+        passwordItems++;
+        continue;
+      }
+      const label = (JSON.parse(match[2]!) as string).trim();
+      if (kind === "link") {
         links.add(label);
       } else {
         formLabels.push(label);
       }
     }
 
+    // The items and fields lists may describe the same inputs.
+    const passwordCount = Math.max(passwordItems, passwordFields);
+    const hasPassword = passwordCount > 0;
     const { accountForm, sessionEnded, signIn } = SIGNED_OUT_WORDS;
     // A sign-up link next to a sign-in form does not make it a sign-up form.
     const isAccountPrompt = (label: string) => accountForm.some((pattern) => pattern.test(label));
-    if (hasPassword && (hasNewPassword || accountFormPath.test(url.pathname) ||
+    if (hasPassword && (passwordCount > 1 || hasNewPassword || accountFormPath.test(url.pathname) ||
         formLabels.some(isAccountPrompt) ||
         text.split("\n").map((line) => line.trim()).some((line) => !links.has(line) && isAccountPrompt(line)))) {
       return { state: "hold_for_amit", reason: "account_form" };
