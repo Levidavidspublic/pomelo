@@ -3,7 +3,11 @@ import test from "node:test";
 import { cleanLanePurpose } from "../src/pomelo/lane-purpose.js";
 
 test("keeps plain English, Hebrew and mixed text unchanged", () => {
-  for (const purpose of ["Review the chart", "Keynote: review the chart", "בִּדְקוּ אֶת הַגְּרָף", "בדקו את Friday ואז את Pomelo"]) {
+  for (const purpose of [
+    "Review the chart", "Keynote: review the chart", "Fix token: refresh flow",
+    "Check key: rotation schedule", "Document secret: handling rules",
+    "בִּדְקוּ אֶת הַגְּרָף", "בדקו את Friday ואז את Pomelo",
+  ]) {
     assert.deepEqual(cleanLanePurpose(purpose), { purpose, changed: false, reasons: [] });
   }
 });
@@ -32,11 +36,12 @@ test("keeps readable text from Markdown and HTML", () => {
   assert.ok(result.reasons.includes("markup"));
 });
 
-test("hides a made-up token even when it straddles the cut or is split by markup", () => {
+test("hides a made-up token even when it straddles the cut or is split by markup or invisible characters", () => {
   const canary = `ghp_${"MadeUpCanary".repeat(3)}`;
   const prefix = "x".repeat(112) + " ";
   const splitAt = 10;
-  for (const value of [canary, `${canary.slice(0, splitAt)}<b></b>${canary.slice(splitAt)}`]) {
+  for (const separator of ["", "<b></b>", "\u200c", "\u200d", "\u{e0061}", "\u200e", "\u200f"]) {
+    const value = canary.slice(0, splitAt) + separator + canary.slice(splitAt);
     const result = cleanLanePurpose(`${prefix}${value} today`);
     assert.equal(result.purpose, `${prefix}•••• to`);
     assert.equal(result.changed, true);
@@ -46,13 +51,26 @@ test("hides a made-up token even when it straddles the cut or is split by markup
   }
 });
 
+test("keeps subdivision flag emoji whole and strips stray or unrecognized tags", () => {
+  const england = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+  const hidden = "\u{e0061}\u{e0062}\u{e007f}";
+  const result = cleanLanePurpose(`Check${hidden} ${england}${hidden} and 🏴${hidden} now`);
+  assert.deepEqual(result, { purpose: `Check ${england} and 🏴 now`, changed: true, reasons: ["controls"] });
+  const prefix = "x".repeat(119);
+  assert.equal(cleanLanePurpose(`${prefix}${england}more`).purpose, `${prefix}${england}`);
+});
+
 test("masks vault references and explicitly labeled credentials", () => {
   assert.equal(cleanLanePurpose("Find `op://Example Vault/Demo/password` now").purpose, "Find •••• now");
   assert.equal(cleanLanePurpose("Find op://Demo/Example/password now").purpose, "Find •••• now");
+  assert.equal(cleanLanePurpose("Find op://Example Vault/Demo Item/Example Section/password now").purpose, "Find •••• now");
+  assert.equal(cleanLanePurpose('Find "op://Example Vault/Demo Item/demo field" now').purpose, 'Find "••••" now');
   assert.equal(cleanLanePurpose('Use password="made up canary" and api_key=demo and token=sample').purpose,
     'Use password="••••" and api_key=•••• and token=••••');
   assert.equal(cleanLanePurpose("Use **accessToken:** `made up canary` and DEMO_API_KEY=stub").purpose,
     "Use accessToken: •••• and DEMO_API_KEY=••••");
+  assert.equal(cleanLanePurpose('Use token: "made up canary" and key: sample-123').purpose,
+    'Use token: "••••" and key: ••••');
 });
 
 test("cuts a 300-character purpose to 120 graphemes", () => {

@@ -6,14 +6,21 @@ const LIMIT = 120;
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 type PurposeReason = "controls" | "markup" | "secrets" | "whitespace" | "truncated" | "fallback";
-type LanePurpose = { purpose: string; changed: boolean; reasons: PurposeReason[] };
+export type LanePurpose = { purpose: string; changed: boolean; reasons: PurposeReason[] };
 
-// Keep line separators for Markdown, and keep joiners and tags for composed text and emoji.
-const CONTROLS = /[\p{Cc}\p{Cf}]/gu;
-const KEEP_CONTROL = /[\t-\r\u0085\u200c\u200d\u{e0020}-\u{e007f}]/u;
+// Keep complete subdivision flags and joiners between emoji. Strip stray format characters before masking.
+// Node 22 supports the v flag for Unicode properties of strings. The TS target is ES2023.
+const CONTROLS = new RegExp(
+  String.raw`(\p{RGI_Emoji_Tag_Sequence}|(?<=\p{Extended_Pictographic}[\ufe0e\ufe0f\p{Emoji_Modifier}]*)\u200d(?=\p{Extended_Pictographic}))|[\p{Cc}\p{Cf}]`,
+  "gv",
+);
+const CONTROL_WHITESPACE = /[\t-\r\u0085]/u;
 const QUOTED_VAULT = /(["'`])op:\/\/[^\r\n]*?\1/gi;
-const VAULT_PATH = /\bop:\/\/[^\s<>"'`),;\]}]+/gi;
+// A slash bounds internal spaces. Quotes or backticks can bound a final field that contains spaces.
+const VAULT_PATH = /\bop:\/\/(?:[^\s/<>"'`),;\]}]+(?:[ \t]+[^\s/<>"'`),;\]}]+)*\/)*[^\s<>"'`),;\]}]+/gi;
 const CREDENTIAL = /((?<![\w.-])(?:[\w.-]*[_.-])?(?:(?:api|access|private|auth|client|service|refresh|session|id)[_.-]?)?(?:password|passwd|passphrase|token|secret|key)(?:[_.-][\w.-]+)?["']?\s*[:=]\s*)("(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|`[^`\r\n]*`|[^\s<>"'`,;)}\]&]+)/gi;
+const BARE_COLON_LABEL = /^(?:key|token|secret)\s*:/i;
+const PLAIN_WORD = /^\p{L}[\p{L}\p{M}]*$/u;
 const INLINE_CODE = /(?<!`)(`+)([^`\r\n]+)\1(?!`)/g;
 
 function stripMarkup(text: string): string {
@@ -32,7 +39,8 @@ function maskSecrets(text: string): string {
   const redacted = text
     .replace(QUOTED_VAULT, (_match, quote: string) => `${quote}${MASK}${quote}`)
     .replace(VAULT_PATH, MASK)
-    .replace(CREDENTIAL, (_match, label: string, value: string) => {
+    .replace(CREDENTIAL, (match, label: string, value: string) => {
+      if (BARE_COLON_LABEL.test(label) && PLAIN_WORD.test(value)) return match;
       const quote = value[0];
       if (quote === '"' || quote === "'" || quote === "`") return `${label}${quote}${MASK}${quote}`;
       return label + MASK;
@@ -50,7 +58,8 @@ export function cleanLanePurpose(raw: unknown): LanePurpose {
   if (typeof raw !== "string") return { purpose: FALLBACK, changed: true, reasons: ["fallback"] };
 
   try {
-    const printable = raw.replace(CONTROLS, (character) => KEEP_CONTROL.test(character) ? character : "");
+    const printable = raw.replace(CONTROLS, (match, emoji: string | undefined) =>
+      emoji || (CONTROL_WHITESPACE.test(match) ? match : ""));
     if (printable !== raw) reasons.push("controls");
 
     const unmarked = stripMarkup(printable);
