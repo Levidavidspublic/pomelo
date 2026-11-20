@@ -48,7 +48,7 @@ interface Kept {
   tools: Partial<Record<EngineTool, Pick<ToolUpdate, "version" | "latest" | "last"> & { checkedAt?: number }>>;
 }
 
-const stateDir = () => process.env.FRIDAY_STATE_DIR || path.join(homedir(), ".friday");
+const stateDir = () => process.env.FRIDAY_STATE_DIR || process.env.FRIDAY_HOME || path.join(homedir(), ".friday");
 const keptFile = () => path.join(stateDir(), "tool-updates.json");
 let kept: Kept | null = null;
 async function load(): Promise<Kept> {

@@ -136,7 +136,7 @@ export interface AccountUsage {
 }
 
 /** Friday's data on this computer (FRIDAY_STATE_DIR: the tests' own, so a stand-in's limits never land in a real one). */
-const dir = () => process.env.FRIDAY_STATE_DIR || path.join(homedir(), ".friday");
+const dir = () => process.env.FRIDAY_STATE_DIR || process.env.FRIDAY_HOME || path.join(homedir(), ".friday");
 const claudeFile = () => path.join(dir(), "claude-limits.json");
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
