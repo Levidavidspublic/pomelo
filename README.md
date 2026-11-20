@@ -1,10 +1,10 @@
 # Pomelo
 
-Pomelo is a work-in-progress agent harness. The project began as an independent AI-native Chromium browser. No compiled browser release is available yet.
+An independent AI-native Chromium browser. Work in progress. No compiled browser release is available yet.
 
 ## Built on Friday
 
-Pomelo is a fork of Friday, the MIT-licensed agent harness by Arun Dass and contributors. Pomelo's hooks into Friday are listed in [PATCHES.md](PATCHES.md). [Upstream Friday](https://github.com/splashxmoon/friday)
+Pomelo is a fork of Friday by Arun Dass, under the MIT license. Pomelo's hooks into Friday are listed in [PATCHES.md](PATCHES.md). [Upstream Friday](https://github.com/splashxmoon/friday)
 
 ## What works today
 
