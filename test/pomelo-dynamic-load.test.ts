@@ -31,8 +31,8 @@ test("reports each dynamic load with its path, added line, rule, and reason", ()
     { path: server, line: 5, rule: "dynamic-resolve" },
     { path: server, line: 6, rule: "dynamic-worker" },
     { path: server, line: 7, rule: "dynamic-worker" },
-    { path: server, line: 8, rule: "vm-run-in" },
-    { path: server, line: 9, rule: "vm-run-in" },
+    { path: server, line: 8, rule: "vm-context-runner" },
+    { path: server, line: 9, rule: "vm-context-runner" },
     { path: server, line: 10, rule: "vm-script" },
   ]);
   assert.deepEqual(new Set(findings.map(({ rule }) => rule)), new Set(DYNAMIC_LOAD_RULES));
@@ -79,14 +79,14 @@ test("checks optional calls and optional member access", () => {
   assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
     { line: 1, rule: "dynamic-require" },
     { line: 2, rule: "dynamic-resolve" },
-    { line: 3, rule: "vm-run-in" },
-    { line: 4, rule: "vm-run-in" },
+    { line: 3, rule: "vm-context-runner" },
+    { line: 4, rule: "vm-context-runner" },
     { line: 5, rule: "module-register" },
     { line: 6, rule: "create-require" },
   ]);
 });
 
-test("checks workers constructed through browser globals", () => {
+test("checks workers constructed through browser globals and module namespaces", () => {
   const findings = dynamicLoadGuard([changed(client,
     "new window.Worker(path);",
     "new self.Worker(path);",
@@ -97,6 +97,10 @@ test("checks workers constructed through browser globals", () => {
     'new window.Worker(new URL("./w.js", import.meta.url));',
     'new self.SharedWorker("./w.js", options);',
     'new globalThis.Worker("./w.js");',
+    "new wt.Worker(path);",
+    "new threads.SharedWorker(path);",
+    'new wt.Worker(new URL("./w.js", import.meta.url));',
+    "wt.Worker(path);",
   )]);
   assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
     { line: 1, rule: "dynamic-worker" },
@@ -105,6 +109,21 @@ test("checks workers constructed through browser globals", () => {
     { line: 4, rule: "dynamic-worker" },
     { line: 5, rule: "dynamic-worker" },
     { line: 6, rule: "dynamic-worker" },
+    { line: 10, rule: "dynamic-worker" },
+    { line: 11, rule: "dynamic-worker" },
+  ]);
+});
+
+test("checks module.require while allowing literal paths and unrelated methods", () => {
+  const findings = dynamicLoadGuard([changed(server,
+    "module.require(path);",
+    "module?.require?.(path);",
+    'module.require("node:path");',
+    "obj.require(path);",
+  )]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 1, rule: "dynamic-require" },
+    { line: 2, rule: "dynamic-require" },
   ]);
 });
 
@@ -138,6 +157,46 @@ test("checks loads in division expressions after postfix operators", () => {
   assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
     { line: 1, rule: "dynamic-import" },
     { line: 2, rule: "dynamic-import" },
+  ]);
+});
+
+test("checks calls after regex literals and leaves regex bodies opaque", () => {
+  const findings = dynamicLoadGuard([changed(server,
+    "if (ok) /'/.test(s) && import(path);",
+    'while (check(ok)) /"/.test(s) && require(path);',
+    "if (ok) /import(path)/.test(s);",
+    "result() / (await import(path), 1) / 1;",
+  )]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 1, rule: "dynamic-import" },
+    { line: 2, rule: "dynamic-require" },
+    { line: 4, rule: "dynamic-import" },
+  ]);
+});
+
+test("checks calls after JSX text containing a lone quote", () => {
+  const path = "src/client/pomelo/preview.tsx";
+  const findings = dynamicLoadGuard([changed(path,
+    "const preview = <><p>don't</p>{import(path)}</>;",
+    'const other = <><p>"</p>{require(path)}</>;',
+  )]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 1, rule: "dynamic-import" },
+    { line: 2, rule: "dynamic-require" },
+  ]);
+});
+
+test("checks division and code after a comment terminator at the start of an added fragment", () => {
+  const findings = dynamicLoadGuard([{
+    path: server,
+    added: [
+      { line: 9, text: "/ (await import(path), 1) / 1;" },
+      { line: 15, text: "*/ import(path); /**" },
+    ],
+  }]);
+  assert.deepEqual(findings.map(({ line, rule }) => ({ line, rule })), [
+    { line: 9, rule: "dynamic-import" },
+    { line: 15, rule: "dynamic-import" },
   ]);
 });
 

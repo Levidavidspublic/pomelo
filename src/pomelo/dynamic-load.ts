@@ -5,7 +5,7 @@ const REASONS = {
   "module-register": "module.register can install custom module loading hooks.",
   "dynamic-resolve": "Use one quoted string literal as the import.meta.resolve path.",
   "dynamic-worker": "Use a quoted worker path or a URL with a quoted path and import.meta.url as its base.",
-  "vm-run-in": "This vm method executes source as code.",
+  "vm-context-runner": "This vm method executes source as code.",
   "vm-script": "vm.Script compiles source as code.",
 } as const;
 
@@ -19,7 +19,7 @@ type ChangedFile = {
 };
 
 type Finding = { path: string; line: number; rule: Rule; reason: string };
-type Token = { text: string; line: number; quoted: boolean };
+type Token = { text: string; line: number; quoted?: boolean; identifier?: boolean };
 
 const LOADERS: readonly {
   rule: Rule;
@@ -28,26 +28,21 @@ const LOADERS: readonly {
 }[] = [
   { rule: "dynamic-import", callee: ["import"], pathArgument: "single" },
   { rule: "dynamic-require", callee: ["require"], pathArgument: "single" },
+  { rule: "dynamic-require", callee: ["module", ".", "require"], pathArgument: "single" },
   { rule: "create-require", callee: ["createRequire"] },
   { rule: "module-register", callee: ["module", ".", "register"] },
   { rule: "dynamic-resolve", callee: ["import", ".", "meta", ".", "resolve"], pathArgument: "single" },
-  { rule: "dynamic-worker", callee: ["new", "Worker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "SharedWorker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "window", ".", "Worker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "window", ".", "SharedWorker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "self", ".", "Worker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "self", ".", "SharedWorker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "globalThis", ".", "Worker"], pathArgument: "worker" },
-  { rule: "dynamic-worker", callee: ["new", "globalThis", ".", "SharedWorker"], pathArgument: "worker" },
-  { rule: "vm-run-in", callee: ["vm", ".", "runInNewContext"] },
-  { rule: "vm-run-in", callee: ["vm", ".", "runInThisContext"] },
+  { rule: "dynamic-worker", callee: ["new"], pathArgument: "worker" },
+  { rule: "vm-context-runner", callee: ["vm", ".", "runInNewContext"] },
+  { rule: "vm-context-runner", callee: ["vm", ".", "runInThisContext"] },
   { rule: "vm-script", callee: ["new", "vm", ".", "Script"] },
 ];
 
-const CODE_TOKEN = /(?<trivia>\s+|\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?(?:\*\/|$))|(?<quoted>"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n])*"|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n])*')|["'][^\r\n]*|[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*|=>|\?\.|\+\+|--|[\s\S]/uy;
+const CODE_TOKEN = /(?<trivia>\s+|\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?(?:\*\/|$))|(?<quoted>"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n])*"|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n])*')|(?<identifier>[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*)|=>|\?\.|\+\+|--|[\s\S]/uy;
 const TEMPLATE_TOKEN = /\\[\s\S]|\$\{|`|[^\\`$]+|[\s\S]/y;
 const REGEX_LITERAL = /\/(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\\[\r\n])+\/[a-z]*/y;
 const REGEX_PREFIX = /^(?:[=(:,;!&|?~+*%^{\[]|=>|return|throw|case|typeof|void|yield)$/;
+const CONTROL_HEAD = /^(?:if|while|for|with)$/;
 
 function tokenize(source: string, firstLine: number): Token[] {
   const tokens: Token[] = [];
@@ -55,6 +50,8 @@ function tokenize(source: string, firstLine: number): Token[] {
   const template = new RegExp(TEMPLATE_TOKEN);
   const regex = new RegExp(REGEX_LITERAL);
   const interpolationDepths: number[] = [];
+  const controlParens: boolean[] = [];
+  let afterControlHead = false;
   let templateText = false;
   let line = firstLine;
 
@@ -76,7 +73,14 @@ function tokenize(source: string, firstLine: number): Token[] {
         tokens.push({ text, line, quoted: false });
       }
     } else if (!match.groups?.trivia) {
-      if (text === "/" && REGEX_PREFIX.test(tokens.at(-1)?.text ?? "=")) {
+      const previous = tokens.at(-1)?.text;
+      // A fragment can start with the end of a comment opened on an unchanged line.
+      if (previous === undefined && text === "*" && source[offset] === "/") {
+        offset++;
+        continue;
+      }
+      // With no preceding code at a diff gap, a slash may continue a division expression.
+      if (text === "/" && (afterControlHead || (previous === undefined ? firstLine === 1 : REGEX_PREFIX.test(previous)))) {
         regex.lastIndex = match.index;
         const literal = regex.exec(source);
         if (literal) {
@@ -84,6 +88,12 @@ function tokenize(source: string, firstLine: number): Token[] {
           offset = regex.lastIndex;
         }
       }
+
+      if (text === "(") {
+        const beforePrevious = tokens.at(-2)?.text;
+        controlParens.push(CONTROL_HEAD.test(previous ?? "") && beforePrevious !== "." && beforePrevious !== "?.");
+      }
+      afterControlHead = text === ")" && controlParens.pop() === true;
 
       if (text === "`") templateText = true;
       const depth = interpolationDepths.length - 1;
@@ -96,7 +106,7 @@ function tokenize(source: string, firstLine: number): Token[] {
           interpolationDepths[depth]--;
         }
       }
-      tokens.push({ text, line, quoted: match.groups?.quoted !== undefined });
+      tokens.push({ text, line, quoted: Boolean(match.groups?.quoted), identifier: Boolean(match.groups?.identifier) });
     }
     line += text.split("\n").length - 1;
   }
@@ -136,6 +146,13 @@ function checkRun(tokens: readonly Token[], path: string, findings: Finding[]): 
       if (isProperty && rule !== "create-require") continue;
       if (!matches(tokens, index, callee, true)) continue;
       let open = index + callee.length;
+      if (pathArgument === "worker") {
+        // A browser global or a module namespace may qualify the constructor.
+        if (tokens[open]?.identifier && tokens[open + 1]?.text === ".") open += 2;
+        const constructor = tokens[open]?.text;
+        if (constructor !== "Worker" && constructor !== "SharedWorker") continue;
+        open++;
+      }
       if (tokens[open]?.text === "?.") open++;
       if (tokens[open]?.text !== "(") continue;
 
