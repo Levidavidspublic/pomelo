@@ -34,6 +34,7 @@ test("refuses redirects to non-web schemes", () => {
     const result = check([startAddress, address]);
     assert.equal(result.decision, "refuse", address);
     assert.equal(result.reason, "unsupported-scheme", address);
+    assert.equal(result.message, "This address uses an unsupported scheme.", address);
   }
 });
 
@@ -49,11 +50,14 @@ test("holds private-network hops even when the final address is public", () => {
   for (const host of [
     "127.0.0.1", "localhost", "10.0.0.5", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.1.2",
     "[::1]", "[fd00::1]", "[febf::1]", "[::ffff:127.0.0.1]", "0x7f000001", "Service.Localhost.",
+    "0.0.0.0", "100.64.0.1", "device.local", "service.internal",
   ]) {
     const result = check([startAddress, `https://${host}/`, `${startAddress}done`]);
     assert.equal(result.decision, "hold", host);
     assert.equal(result.reason, "private-network", host);
   }
+  assert.equal(check([startAddress, "https://Service.Localhost./"]).message,
+    "This private network address (service.localhost) requires approval.");
 });
 
 test("allows public IP addresses outside the private ranges", () => {
@@ -77,6 +81,7 @@ test("refuses a malformed address and an empty chain", () => {
   const malformed = check([startAddress, "not an address"]);
   assert.equal(malformed.decision, "refuse");
   assert.equal(malformed.reason, "bad-address");
+  assert.equal(malformed.message, "The address is invalid.");
   const empty = check([]);
   assert.equal(empty.decision, "refuse");
   assert.equal(empty.reason, "empty-chain");

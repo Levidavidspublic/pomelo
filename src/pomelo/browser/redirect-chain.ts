@@ -80,10 +80,10 @@ export function checkRedirectChain({ hops, startSite, hasFillGrant }: RedirectCh
     try {
       url = new URL(address);
     } catch {
-      return { decision: "refuse", reason: "bad-address", message: "A navigation hop has an invalid address." };
+      return { decision: "refuse", reason: "bad-address", message: "The address is invalid." };
     }
     if (url.protocol !== "https:" && url.protocol !== "http:") {
-      return { decision: "refuse", reason: "unsupported-scheme", message: "Navigation hops must use HTTP or HTTPS." };
+      return { decision: "refuse", reason: "unsupported-scheme", message: "This address uses an unsupported scheme." };
     }
 
     const host = normalizeHostname(url.hostname);
@@ -97,7 +97,7 @@ export function checkRedirectChain({ hops, startSite, hasFillGrant }: RedirectCh
       if (previousProtocol === "https:" && url.protocol === "http:") {
         firstHold = { decision: "hold", reason: "downgrade", host, message: `Switching to plain HTTP on ${host} requires approval.` };
       } else if (isPrivateHost(host)) {
-        firstHold = { decision: "hold", reason: "private-network", host, message: `Opening the private network host ${host} requires approval.` };
+        firstHold = { decision: "hold", reason: "private-network", host, message: `This private network address (${host}) requires approval.` };
       } else if (index === hops.length - 1 && hasFillGrant && siteFor(host) !== siteFor(normalizeHostname(startSite))) {
         firstHold = { decision: "hold", reason: "new-site", host, message: `Opening ${host} with a fill grant for another site requires approval.` };
       }
