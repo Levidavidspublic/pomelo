@@ -78,9 +78,8 @@ export function widgetStep(state: WidgetState, event: WidgetEvent): WidgetState 
     case "expired":
       return status === "open" ? { cardId, status: "closed" } : state;
     case "reload":
-      return event.answer === undefined
-        ? startWidget(cardId)
-        : { cardId, status: "answered", picked: copyPick(event.answer) };
+      if (event.answer !== undefined) return { cardId, status: "answered", picked: copyPick(event.answer) };
+      return status === "sending" ? state : startWidget(cardId);
   }
 }
 

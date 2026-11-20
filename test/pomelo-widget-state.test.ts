@@ -66,6 +66,17 @@ test("reload restores the saved answer or opens a fresh card", () => {
   assert.equal(widgetView(zero).pickedLabel, "0");
 });
 
+test("reload without a saved answer keeps an in-flight answer pending", () => {
+  const sending = widgetStep(widgetStep(startWidget(cardId), pick), send);
+  const reloaded = widgetStep(sending, reload);
+
+  assert.strictEqual(reloaded, sending);
+  assert.strictEqual(widgetStep(reloaded, send), sending);
+  assert.deepEqual(widgetView(widgetStep(reloaded, accepted)), {
+    status: "answered", label: "Answered", pickedLabel: "Table", canAnswer: false, busy: false,
+  });
+});
+
 const events: readonly WidgetEvent[] = [pick, send, accepted, refused, expired, reload, reloadAnswered];
 
 test("answered and closed cards keep the same state for every later event", () => {
