@@ -1,8 +1,12 @@
+import { useSyncExternalStore } from "react";
 import type { RecentSession } from "../storage.js";
 import type { PomeloRailProps } from "./PomeloRail.js";
 import type { ThreadMeta } from "./rail-order.js";
+import { subscribeThreadMeta, threadMetaSnapshot } from "./thread-meta-store.js";
 
-export { subscribeThreadMeta, threadMetaSnapshot } from "./thread-meta-store.js";
+export function useRailThreadMeta() {
+  return useSyncExternalStore(subscribeThreadMeta, threadMetaSnapshot, threadMetaSnapshot);
+}
 
 export function railMountProps(
   sessions: readonly RecentSession[],

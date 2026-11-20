@@ -61,7 +61,7 @@ import { noticeDue, UsageNotice, useUsageSharing } from "./UsageSharing.js";
 import { folderName } from "./Workspace.js";
 import { NEW_THREAD, NEW_THREAD_ON_OPEN } from "./threads-data.js";
 import { PomeloRail } from "./pomelo/PomeloRail.js";
-import { railMountProps, subscribeThreadMeta, threadMetaSnapshot } from "./pomelo/rail-mount.js";
+import { railMountProps, useRailThreadMeta } from "./pomelo/rail-mount.js";
 
 /** `fresh`: a project just made, whose name box was never confirmed: Escape takes it away again. */
 type Renaming = { kind: "session" | "project"; id: string; fresh?: boolean } | null;
@@ -1388,13 +1388,7 @@ function AgentsList({ p }: { p: SidebarProps }) {
 // ── the sessions ────────────────────────────────────────────────────────────────────────────
 
 function SessionsList({ p }: { p: SidebarProps }) {
-  const [threadMeta, setThreadMeta] = useState(threadMetaSnapshot);
-  useEffect(() => {
-    const sync = () => setThreadMeta(threadMetaSnapshot());
-    const unsubscribe = subscribeThreadMeta(sync);
-    sync();
-    return unsubscribe;
-  }, []);
+  const threadMeta = useRailThreadMeta();
   const [renaming, setRenaming] = useState<Renaming>(null);
   // Deleting a project is the one thing in this list that is not undoable, so it asks first.
   const [ask, confirmUI] = useConfirm();
