@@ -15,3 +15,4 @@ This ledger records Pomelo's hooks into Friday so each change can be reviewed wh
 | `src/client/App.tsx` | Pass session-list replies to the Pomelo thread metadata store (2 lines). | The rail can read thread metadata from the session list App already fetches. | #263 |
 | `src/client/Sidebar.tsx` | Subscribe to thread metadata and mount PomeloRail above the session list when a listed session has a project tag. | Show project groups in the app and open their rows through Friday's session handler. | #712 |
 | `src/local/start.ts` | Apply Pomelo defaults at the start of `startLocal`, before it resolves the data folder and port. | Pomelo defaults to `~/.pomelo` and port `4322` so its local server can run beside Friday. | #674 |
+| `src/runner/tool-limits.ts` | Resolve `tool-limits.json` under `FRIDAY_HOME`, falling back to `~/.friday` when unset or empty. | Pomelo keeps its cached tool limits in its own data folder when installed beside Friday. | #802 |
