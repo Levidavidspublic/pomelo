@@ -72,19 +72,31 @@ test("an open event only includes rail metadata", () => {
 
 test("a credential-shaped canary hides the entire title on opens and renames", () => {
   const canary = "RailCanaryForTest9".repeat(2);
-  const after = { ...thread, title: `Draft Bearer ${canary}` };
-  for (const before of [null, thread]) {
-    const event = buildRailEvent(before, after);
-    assert.equal(event?.title, "[hidden]");
-    assert.equal(JSON.stringify(event).includes(canary), false);
+  const bearerTitle = `Draft Bearer ${canary}`;
+  const providerCanary = `ghp_${"railcanary".repeat(3)}`;
+  const credentialTitles = [
+    { title: bearerTitle, secret: canary },
+    { title: `Review **${providerCanary}**`, secret: providerCanary },
+    { title: 'Draft client_secret="not a real credential"', secret: "not a real credential" },
+  ];
+  for (const { title, secret } of credentialTitles) {
+    for (const before of [null, thread]) {
+      const event = buildRailEvent(before, { ...thread, title });
+      assert.equal(event?.title, "[hidden]");
+      assert.equal(JSON.stringify(event).includes(secret), false);
+    }
   }
-  assert.equal(buildRailEvent(after, { ...after, title: canary }), undefined);
+  assert.equal(buildRailEvent({ ...thread, title: bearerTitle }, { ...thread, title: canary }), undefined);
 });
 
 test("invalid records give no event", () => {
-  for (const invalid of [false, "draft", [], {}, { sid: " " }, { sid: 3 }, { ...thread, lastActivityAt: NaN }]) {
+  const invalidRecords = [false, "draft", [], {}, { sid: " " }, { sid: 3 },
+    { ...thread, lastActivityAt: NaN }, { ...thread, projectTags: ["docs", 3] }];
+  for (const invalid of invalidRecords) {
     assert.equal(buildRailEvent(null, invalid), undefined);
+    assert.equal(buildRailEvent(thread, invalid), undefined);
     assert.equal(buildRailEvent(invalid, thread), undefined);
   }
+  assert.equal(buildRailEvent(null, null), undefined);
   assert.equal(buildRailEvent(thread, { ...thread, sid: "other" }), undefined);
 });
