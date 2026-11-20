@@ -155,6 +155,7 @@ import { openInTerminal } from "./runner/terminal.js";
 import { rankTools, taskTier } from "./routing.js";
 import { fridayMeshDeps, pomeloMeshHook } from "./pomelo/mesh-boot.js";
 import { pomeloStore, sessionRowsWithMeta } from "./pomelo/session-rows.js";
+import { pomeloActivityHook, subscribeToSessionActivity } from "./pomelo/activity-hook.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Resolved once: the traversal guard in serveStatic compares against this with
@@ -818,6 +819,7 @@ export async function createApp(o: AppOptions) {
       }
     })().catch((err) => console.error("[notify-hook]", err));
   };
+  void subscribeToSessionActivity(sub, o.prefix, pomeloActivityHook({ store: pomeloStore(redis), now: Date.now })).catch(() => {});
   await bus.start();
   const files = new FileStore(o.dataDir ?? process.env.DATA_DIR ?? path.join(process.cwd(), "data", "uploads"));
   // Uploaded folders are unpacked beside the blobs they came from: same
