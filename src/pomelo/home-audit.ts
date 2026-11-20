@@ -11,11 +11,9 @@ export const HOME_AUDIT_ALLOWLIST = [
   "src/runner/git.ts", // Worktrees and snapshot indexes.
   "src/runner/github.ts", // GitHub sign-in state.
   "src/runner/imports.ts", // Reads Friday's worktrees for ACP session discovery.
-  "src/runner/limits.ts", // Claude limits cache and usage probe directory.
   "src/runner/own-models.ts", // User-defined model settings.
   "src/runner/runner.ts", // Runner sessions and ACP command, model and effort caches.
   "src/runner/stack.ts", // Saved stacks.
-  "src/runner/tool-updates.ts", // Tool version check results.
 ] as const;
 
 const identifier = String.raw`[\w$]+`;
