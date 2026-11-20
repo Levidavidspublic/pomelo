@@ -12,24 +12,52 @@ const goodSettings = {
 };
 
 const wrongSettings = [
-  { field: "allow_merge_commit", value: true, code: "merge-commit-allowed" },
-  { field: "allow_rebase_merge", value: true, code: "rebase-merge-allowed" },
-  { field: "allow_squash_merge", value: false, code: "squash-off" },
-  { field: "allow_auto_merge", value: false, code: "auto-merge-off" },
-  { field: "delete_branch_on_merge", value: false, code: "branch-not-deleted" },
-  { field: "default_branch", value: "develop", code: "default-branch-not-main" },
+  {
+    field: "allow_merge_commit",
+    value: true,
+    code: "merge-commit-allowed",
+    reason: "Merge commits are allowed, so turn them off to keep each ticket to one commit.",
+  },
+  {
+    field: "allow_rebase_merge",
+    value: true,
+    code: "rebase-merge-allowed",
+    reason: "Rebase merges are allowed, so turn them off to keep each ticket to one commit.",
+  },
+  {
+    field: "allow_squash_merge",
+    value: false,
+    code: "squash-off",
+    reason: "Squash merging is off, so turn it on to land each ticket as one commit.",
+  },
+  {
+    field: "allow_auto_merge",
+    value: false,
+    code: "auto-merge-off",
+    reason: "Auto-merge is off, so turn it on to let ready tickets merge automatically.",
+  },
+  {
+    field: "delete_branch_on_merge",
+    value: false,
+    code: "branch-not-deleted",
+    reason: "Automatic branch deletion is off, so turn it on to remove merged branches.",
+  },
+  {
+    field: "default_branch",
+    value: "develop",
+    code: "default-branch-not-main",
+    reason: "The default branch differs from main, so set it to main.",
+  },
 ] as const;
 
 test("repository settings that allow squash-only merges pass", () => {
   assert.deepEqual(checkMergeSettings(JSON.stringify(goodSettings)), { ok: true, problems: [] });
 });
 
-for (const { field, value, code } of wrongSettings) {
+for (const { field, value, code, reason } of wrongSettings) {
   test(`reports only ${code} when ${field} has the wrong value`, () => {
     const result = checkMergeSettings(JSON.stringify({ ...goodSettings, [field]: value }));
-    assert.equal(result.ok, false);
-    assert.deepEqual(result.problems.map(({ code, field }) => ({ code, field })), [{ code, field }]);
-    assert.ok(result.problems[0].reason.trim());
+    assert.deepEqual(result, { ok: false, problems: [{ code, field, reason }] });
   });
 
   test(`reports ${field} when missing`, () => {
@@ -59,8 +87,21 @@ test("ignores unknown repository fields", () => {
 test("requires JSON booleans for merge flags", () => {
   const settings = { ...goodSettings, allow_merge_commit: 0, allow_squash_merge: "true" };
   const result = checkMergeSettings(JSON.stringify(settings));
-  assert.equal(result.ok, false);
-  assert.deepEqual(result.problems.map(({ code }) => code), ["merge-commit-allowed", "squash-off"]);
+  assert.deepEqual(result, {
+    ok: false,
+    problems: [
+      {
+        code: "merge-commit-allowed",
+        field: "allow_merge_commit",
+        reason: "The allow_merge_commit value must be the JSON literal false.",
+      },
+      {
+        code: "squash-off",
+        field: "allow_squash_merge",
+        reason: "The allow_squash_merge value must be the JSON literal true.",
+      },
+    ],
+  });
 });
 
 test("reports all problems in the same order regardless of JSON field order", () => {

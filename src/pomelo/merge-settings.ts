@@ -5,37 +5,37 @@ const rules = [
     field: "allow_merge_commit",
     expected: false,
     code: "merge-commit-allowed",
-    reason: "Turn off merge commits so each ticket lands as one commit.",
+    reason: "Merge commits are allowed, so turn them off to keep each ticket to one commit.",
   },
   {
     field: "allow_rebase_merge",
     expected: false,
     code: "rebase-merge-allowed",
-    reason: "Turn off rebase merges so each ticket lands as one commit.",
+    reason: "Rebase merges are allowed, so turn them off to keep each ticket to one commit.",
   },
   {
     field: "allow_squash_merge",
     expected: true,
     code: "squash-off",
-    reason: "Turn on squash merging so each ticket lands as one commit.",
+    reason: "Squash merging is off, so turn it on to land each ticket as one commit.",
   },
   {
     field: "allow_auto_merge",
     expected: true,
     code: "auto-merge-off",
-    reason: "Turn on auto-merge so ready tickets can merge automatically.",
+    reason: "Auto-merge is off, so turn it on to let ready tickets merge automatically.",
   },
   {
     field: "delete_branch_on_merge",
     expected: true,
     code: "branch-not-deleted",
-    reason: "Turn on automatic deletion of merged branches.",
+    reason: "Automatic branch deletion is off, so turn it on to remove merged branches.",
   },
   {
     field: "default_branch",
     expected: "main",
     code: "default-branch-not-main",
-    reason: "Set the default branch to main.",
+    reason: "The default branch differs from main, so set it to main.",
   },
 ];
 
@@ -56,7 +56,13 @@ export function checkMergeSettings(jsonText: string): { ok: boolean; problems: P
   for (const { field, expected, code, reason } of rules) {
     if (!Object.hasOwn(settings, field)) {
       problems.push({ code: "field-missing", field, reason: `Include ${field} in the repository settings JSON.` });
-    } else if (settings[field] !== expected) {
+      continue;
+    }
+
+    const value = settings[field];
+    if (typeof value !== typeof expected) {
+      problems.push({ code, field, reason: `The ${field} value must be the JSON literal ${JSON.stringify(expected)}.` });
+    } else if (value !== expected) {
       problems.push({ code, field, reason });
     }
   }
