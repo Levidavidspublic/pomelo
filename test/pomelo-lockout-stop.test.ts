@@ -44,6 +44,18 @@ test("detects English and Hebrew lockout wording in the title, text and items", 
   expectHold({ ...page, title: "זיהינו ניסיון התחברות חשוד" }, "suspicious_sign_in");
 });
 
+test("holds when an English or Hebrew lockout message puts the verb first", () => {
+  expectHold({ ...page, text: "We have locked your account" }, "account_locked");
+  expectHold({ ...page, text: "We suspended your account" }, "account_locked");
+  expectHold({ ...page, items: ['[1] button "נעלנו את חשבונך"'] }, "account_locked");
+});
+
+test("holds when a mask or a punctuated identifier appears inside a lockout message", () => {
+  expectHold({ ...page, text: `The account ${MASK} has been locked` }, "account_locked");
+  expectHold({ ...page, text: "The account (example.invalid) has been locked" }, "account_locked");
+  expectHold({ ...page, title: `החשבון ${MASK} ננעל` }, "account_locked");
+});
+
 test("holds for security-question instructions and familiar challenge prompts", () => {
   expectHold({
     ...page,

@@ -12,10 +12,12 @@ const FORBIDDEN_ACTIONS = Object.freeze(["fill", "reset", "answer"] as const);
 
 export const LOCKOUT_WORDS = Object.freeze({
   account_locked: Object.freeze([
-    /\b(?:account|profile)s? (?:\w+ ){0,4}(?:locked(?: out)?|blocked|disabled|suspended)\b/i,
-    /\b(?:(?:locked|blocked|disabled|suspended) accounts?|locked out of (?:your |the )?account|(?:you are|you have been|you've been|you're) locked out|account lockout)\b/i,
-    /(?:חשבו(?:ן|נות)(?: שלך| זה| המשתמש)?|חשבונך) (?:ננעל|נעול|נחסם|חסום|הושעה)/u,
-    /(?:ננעל|נעול|נחסם|חסום) החשבון/u,
+    // Allow masked identifiers and punctuation within intervening tokens.
+    /\b(?:account|profile)s? (?:\S*[^\s.!?] ){0,4}(?:locked|blocked|disabled|suspended)\b/i,
+    /\b(?:locked|blocked|disabled|suspended) (?:\S*[^\s.!?] ){0,4}(?:account|profile)s?\b/i,
+    /\b(?:(?:you are|you have been|you've been|you're) locked out|account lockout)\b/i,
+    /(?:חשבו(?:ן|נות)|חשבונך) (?:\S*[^\s.!?] ){0,4}(?:ננעל|נעול|נחסם|חסום|הושעה)/u,
+    /(?:נעלנו|חסמנו|השעינו|ננעל|נעול|נחסם|חסום|הושעה) (?:\S*[^\s.!?] ){0,4}(?:ה?חשבו(?:ן|נות)|חשבונך)(?!\p{L})/u,
   ]),
   too_many_tries: Object.freeze([
     /\btoo many (?:(?:failed|incorrect|unsuccessful|sign[ -]?in|log[ -]?in|password) )*(?:attempts|tries)\b/i,
