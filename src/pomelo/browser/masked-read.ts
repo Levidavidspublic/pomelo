@@ -2,7 +2,7 @@ import { MASK, maskField, maskText } from "../mask.js";
 import { planFrameRead, type FrameReadInput } from "./frame-read.js";
 import { dropHiddenText, type HiddenTextElement, type HiddenTextWindow } from "./hidden-text.js";
 import { pageReadRelease, type PageMaskPass, type PageRead } from "./page-read-release.js";
-import { trimPageRead, type PageReadLine } from "./read-budget.js";
+import { trimPageRead } from "./read-budget.js";
 
 interface RawReadElement extends HiddenTextElement {
   role: string;
@@ -43,6 +43,11 @@ function visibleElements(frame: RawReadFrame): RawReadElement[] {
   return visible;
 }
 
+function addedMaskCount(before: string, after: string): number {
+  if (before === after) return 0;
+  return Math.max(0, after.split(MASK).length - before.split(MASK).length);
+}
+
 /** Prepare one page read and stamp it only after all four rules succeed. */
 export function maskedPageRead(input: MaskedPageReadInput): MaskedPageReadResult {
   try {
@@ -65,13 +70,22 @@ export function maskedPageRead(input: MaskedPageReadInput): MaskedPageReadResult
     });
 
     let hasSecretFields = frames.some((frame) => frame.hasSecretField);
-    const lines: PageReadLine[] = elements.map(({ role, text, field }) => {
+    const lines = elements.map(({ role, text, field }) => {
       const maskedField = field && maskField(field);
       // maskField keeps the original object for ordinary fields.
       const secret = maskedField !== field;
       if (secret) hasSecretFields = true;
       const line = [text, maskedField?.value].filter(Boolean).join(" ");
-      return { role: maskText(role, knownSecrets), text: maskText(line, knownSecrets), secret };
+      const maskedRole = maskText(role, knownSecrets);
+      const maskedText = maskText(line, knownSecrets);
+      const fieldMasks = secret && field?.value && field.value !== MASK ? 1 : 0;
+      return {
+        role: maskedRole,
+        text: maskedText,
+        secret,
+        textMasks: fieldMasks + addedMaskCount(line, maskedText),
+        roleMasks: addedMaskCount(role, maskedRole),
+      };
     });
     const maskedUrl = maskText(url, knownSecrets);
     const budget = trimPageRead({ lines, maxChars, maskMarker: MASK });
@@ -81,7 +95,12 @@ export function maskedPageRead(input: MaskedPageReadInput): MaskedPageReadResult
     const read: PageRead = {
       ...binding, url: maskedUrl, readAt, hasSecretFields, text: budget.lines.map(({ text }) => text).join("\n"),
     };
-    const maskPass: PageMaskPass = { ...binding, maskedAt: now, knownCount: knownSecrets.length };
+    // The budget keeps a prefix in order and may render an oversized line by role only.
+    const knownCount = budget.lines.reduce((count, { text }, index) => {
+      const original = lines[index];
+      return count + (text === original.text ? original.textMasks : original.roleMasks);
+    }, 0);
+    const maskPass: PageMaskPass = { ...binding, maskedAt: now, knownCount };
     if (!pageReadRelease(read, maskPass, now).release) return { reason: REFUSAL_REASON };
     return { read, maskPass };
   } catch {
