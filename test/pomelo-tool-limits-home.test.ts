@@ -7,12 +7,19 @@ import test from "node:test";
 
 const toolLimits = new URL("../src/runner/tool-limits.ts", import.meta.url).href;
 
-for (const useAppHome of [true, false]) {
-  test(`tool limits read the cache ${useAppHome ? "under FRIDAY_HOME" : "under ~/.friday when FRIDAY_HOME is unset"}`, async (t) => {
+const cases = [
+  { description: "under FRIDAY_HOME", appHome: "app-home" },
+  { description: "under ~/.friday when FRIDAY_HOME is unset", appHome: undefined },
+  { description: "under ~/.friday when FRIDAY_HOME is empty", appHome: "" },
+];
+
+for (const { description, appHome } of cases) {
+  test(`tool limits read the cache ${description}`, async (t) => {
     const home = await mkdtemp(path.join(tmpdir(), "pomelo-tool-limits-"));
     t.after(() => rm(home, { recursive: true, force: true }));
 
-    const cacheDir = path.join(home, useAppHome ? "app-home" : ".friday");
+    const fridayHome = appHome ? path.join(home, appHome) : appHome;
+    const cacheDir = fridayHome || path.join(home, ".friday");
     const allowance = { plan: "Test plan", windows: [], at: 1 };
     await mkdir(cacheDir);
     await writeFile(path.join(cacheDir, "tool-limits.json"), JSON.stringify({ antigravity: allowance }));
@@ -23,11 +30,12 @@ for (const useAppHome of [true, false]) {
       USERPROFILE: home,
       TMPDIR: home,
       TEMP: home,
-      ...(useAppHome ? { FRIDAY_HOME: cacheDir } : {}),
+      ...(fridayHome === undefined ? {} : { FRIDAY_HOME: fridayHome }),
     };
     const script = `
       import assert from "node:assert/strict";
       import { readOtherTools } from ${JSON.stringify(toolLimits)};
+      process.chdir(process.env.HOME);
       const { antigravity } = await readOtherTools({ start: false });
       assert.deepEqual(antigravity, ${JSON.stringify(allowance)});
     `;
