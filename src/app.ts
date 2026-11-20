@@ -153,6 +153,7 @@ import { OutsideAgents } from "./outside-agents.js";
 import { outsideCommand, outsideSetup } from "./local/outside-mcp.js";
 import { openInTerminal } from "./runner/terminal.js";
 import { rankTools, taskTier } from "./routing.js";
+import { fridayMeshDeps, pomeloMeshHook } from "./pomelo/mesh-boot.js";
 import { pomeloStore, sessionRowsWithMeta } from "./pomelo/session-rows.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1062,6 +1063,10 @@ export async function createApp(o: AppOptions) {
   // The agents in a session talking to each other (agent-mesh.ts): coding tools through their runner, Friday Code directly. A
   // coding tool's hand_off is Friday Code's own, so the same lane rules and bounce limit hold for both.
   const mesh = new AgentMesh(store, bus, (sid, from, req) => handOff(store, bus, sid, from, req));
+  mesh.pomelo = pomeloMeshHook(fridayMeshDeps({
+    sessions: store, store: pomeloStore(redis),
+    handle: (sid, actor, cmd) => core.handle(sid, actor, cmd),
+  }));
   // Friday Code, only ever on one of your own models: nothing metered, and no skills, memory, hubs or other sessions to reach.
   const runtime = new AgentRuntime(store, bus, llm, o.tools ?? defaultTools, { mesh, readRepo: openFolder, resolveFiles: (sid, atts) => resolveAttachments(files, sid, atts), works: (s) => isOwnModel(s.options.model) });
   /** Only a model of your own, and only chosen by you: there is nothing else for Friday Code to run on here. */
