@@ -49,22 +49,25 @@ export function maskedPageRead(input: MaskedPageReadInput): MaskedPageReadResult
     const { scope, frames, siteScope, knownSecrets, now, maxChars } = input;
     const { jobId, pageId, navigationId, url, readAt } = scope;
     const decisions = planFrameRead(url, frames, siteScope);
-    const capturedIds = new Set(decisions.map(({ id }) => id));
+    const framesById = new Map(frames.map((frame) => [frame.id, frame]));
+    const decisionIds = new Set(decisions.map(({ id }) => id));
     const frameIds = [...scope.frameIds];
     const scopedIds = new Set(frameIds);
-    if (capturedIds.size !== frames.length || scopedIds.size !== frameIds.length ||
-      capturedIds.size !== scopedIds.size || frameIds.some((id) => !capturedIds.has(id))) {
+    if (framesById.size !== frames.length || decisionIds.size !== decisions.length ||
+      scopedIds.size !== frameIds.length || framesById.size !== scopedIds.size || decisionIds.size !== scopedIds.size ||
+      frameIds.some((id) => !framesById.has(id) || !decisionIds.has(id))) {
       return { reason: REFUSAL_REASON };
     }
 
-    const elements = decisions.flatMap(({ decision, marker }, index) => {
-      if (decision === "read") return visibleElements(frames[index]);
+    const elements = decisions.flatMap(({ id, decision, marker }) => {
+      if (decision === "read") return visibleElements(framesById.get(id)!);
       return marker ? [{ role: "note", text: marker }] : [];
     });
 
     let hasSecretFields = frames.some((frame) => frame.hasSecretField);
     const lines: PageReadLine[] = elements.map(({ role, text, field }) => {
       const maskedField = field && maskField(field);
+      // maskField keeps the original object for ordinary fields.
       const secret = maskedField !== field;
       if (secret) hasSecretFields = true;
       const line = [text, maskedField?.value].filter(Boolean).join(" ");

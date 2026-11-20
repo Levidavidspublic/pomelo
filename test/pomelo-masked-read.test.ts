@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
 import { HIDDEN_TEXT_MARKER } from "../src/pomelo/browser/hidden-text.js";
 import { maskedPageRead, type MaskedPageReadInput } from "../src/pomelo/browser/masked-read.js";
@@ -46,6 +47,14 @@ test("replaces a password field value even when it is absent from the known valu
   assert.equal(read.hasSecretFields, true);
 });
 
+test("keeps an ordinary field's value visible", () => {
+  const { read } = successfulRead(input([
+    { role: "textbox", text: "Display name", field: { type: "text", value: "Example" } },
+  ]));
+  assert.equal(read.text, "Display name Example");
+  assert.equal(read.hasSecretFields, false);
+});
+
 test("replaces display-none text in page order", () => {
   const { read } = successfulRead(input([
     { role: "heading", text: "Example page" },
@@ -69,6 +78,42 @@ test("emits the frame rule's marker without accessing third-party elements", () 
     }],
   });
   assert.equal(read.text, `Example page\n${thirdPartyMarker}`);
+});
+
+test("uses each frame's own decision when the planner reorders its results", async () => {
+  const readerUrl = new URL("../src/pomelo/browser/masked-read.ts?reordered-frames", import.meta.url).href;
+  const plannerUrl = new URL("../src/pomelo/browser/frame-read.ts", import.meta.url).href;
+  const reorderedPlanner = `
+    import { planFrameRead as plan } from ${JSON.stringify(plannerUrl)};
+    export const planFrameRead = (...args) => plan(...args).reverse();
+  `;
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL === readerUrl && specifier === "./frame-read.js") {
+        return { url: `data:text/javascript,${encodeURIComponent(reorderedPlanner)}`, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    },
+  });
+  try {
+    const { maskedPageRead: readWithReorderedDecisions } = await import(readerUrl) as
+      typeof import("../src/pomelo/browser/masked-read.js");
+    const request = input([{ role: "heading", text: "Example page" }]);
+    const result = readWithReorderedDecisions({
+      ...request,
+      scope: { ...scope, frameIds: ["top", "embed"] },
+      frames: [...request.frames, {
+        ...thirdParty,
+        get elements(): never {
+          throw new Error("Excluded elements were read");
+        },
+      }],
+    });
+    assert.ok("read" in result, "the reordered decisions should yield a masked page read");
+    assert.equal(result.read.text, `${thirdPartyMarker}\nExample page`);
+  } finally {
+    hooks.deregister();
+  }
 });
 
 test("trims a long read at whole-line boundaries and preserves a full mask marker", () => {
@@ -127,17 +172,17 @@ test("withholds the read when trimming removes the marker required by the releas
 test("the serialized read and pass contain no canary in any swept form", () => {
   const request = input([
     field(canary),
-    { role: "text", text: Buffer.from(canary).toString("base64"), displayed: false },
-    { role: "text", text: `Value: ${encodeURIComponent(canary)}` },
+    { role: "text", text: `${canary} ${Buffer.from(canary).toString("base64")}`, displayed: false },
+    { role: "text", text: `Value: ${canary} ${encodeURIComponent(canary)}` },
     { role: "link", text: "More" },
   ]);
-  const expected = `${thirdPartyMarker}\nPassword ${MASK}\n${HIDDEN_TEXT_MARKER}\nValue: ${MASK}`;
+  const expected = `${thirdPartyMarker}\nPassword ${MASK}\n${HIDDEN_TEXT_MARKER}\nValue: ${MASK} ${MASK}`;
   const pageUrl = `${url}?view=${encodeURIComponent(canary)}`;
   const result = successfulRead({
     ...request,
     scope: { ...scope, frameIds: ["top", "embed"], url: pageUrl },
     frames: [
-      { ...thirdParty, elements: [{ role: "text", text: Buffer.from(canary).toString("hex") }] },
+      { ...thirdParty, elements: [{ role: "text", text: `${canary} ${Buffer.from(canary).toString("hex")}` }] },
       { ...request.frames[0], url: pageUrl },
     ],
     knownSecrets: [canary],
