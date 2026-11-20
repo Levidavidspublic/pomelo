@@ -129,7 +129,7 @@ async function ask(url: string, init: RequestInit = {}): Promise<{ status: numbe
 
 // ── the last good reading of each, kept on disk ─────────────────────
 
-const keptFile = () => path.join(home(), ".friday", "tool-limits.json");
+const keptFile = () => path.join(process.env.FRIDAY_HOME ?? path.join(home(), ".friday"), "tool-limits.json");
 let keptCache: Partial<Record<EngineTool, ToolAllowance>> | null = null;
 
 async function keptAll(): Promise<Partial<Record<EngineTool, ToolAllowance>>> {

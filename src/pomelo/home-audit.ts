@@ -15,7 +15,6 @@ export const HOME_AUDIT_ALLOWLIST = [
   "src/runner/own-models.ts", // User-defined model settings.
   "src/runner/runner.ts", // Runner sessions and ACP command, model and effort caches.
   "src/runner/stack.ts", // Saved stacks.
-  "src/runner/tool-limits.ts", // Last known tool limits.
   "src/runner/tool-updates.ts", // Tool version check results.
 ] as const;
 
