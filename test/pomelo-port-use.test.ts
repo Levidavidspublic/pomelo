@@ -26,6 +26,16 @@ test("calls for cleanup of scratch Redis and names its port, program and PID", (
   assert.match(result.reason, /^cleanup\b.*6379.*redis-server.*456\b/);
 });
 
+test("accepts the iproute2 header with Process attached to Peer Address:Port", () => {
+  const compactHeader = "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess";
+  const output = [compactHeader, redis].join("\n");
+
+  assert.equal(checkPorts(output, { ...policy, need: [4000] }).verdict, "go");
+  const result = checkPorts(output, { ...policy, need: [6379] });
+  assert.equal(result.verdict, "cleanup");
+  assert.deepEqual(result.taken, [{ port: 6379, program: "redis-server", pid: 456, action: "cleanup" }]);
+});
+
 test("protected names and PIDs take precedence over cleanup and list ports in order", () => {
   const result = checkPorts(report, {
     ...policy,

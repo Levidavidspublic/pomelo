@@ -32,7 +32,7 @@ interface PortConflict {
   reason: string;
 }
 
-const header = /^(?:Netid\s+)?State\s+Recv-Q\s+Send-Q\s+Local Address:Port\s+Peer Address:Port(?:\s+Process)?$/;
+const header = /^(?:Netid\s+)?State\s+Recv-Q\s+Send-Q\s+Local Address:Port\s+Peer Address:Port(?:\s*Process)?$/;
 const listener = /^(?:tcp\s+)?LISTEN\s+\d+\s+\d+\s+(\S+)\s+(\S+)(?:\s+(.+))?$/;
 // ss can print an interface suffix, for example 127.0.0.53%lo:53.
 const endpoint = /^(?:\*|(?:\d{1,3}\.){3}\d{1,3}|\[[\da-f:.]*:[\da-f:.]*(?:%[^:\s\]]+)?\])(?:%[^:\s]+)?:(\d{1,5}|\*)$/i;
