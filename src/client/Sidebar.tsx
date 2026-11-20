@@ -7,7 +7,7 @@ import { mateItems, roomItems } from "./mate-menu.js";
 import { askNewFolder, DRAG_TYPE as CREW_DRAG, folderItems, moveItems, useCrewFolders, useShutFolders } from "./crew-folders.js";
 import { dragEnds } from "./drag-end.js";
 import { SessionPrBadge } from "./SessionPrs.js";
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type ReactNode } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -60,6 +60,9 @@ import { markUnread, useUnread } from "./unread.js";
 import { noticeDue, UsageNotice, useUsageSharing } from "./UsageSharing.js";
 import { folderName } from "./Workspace.js";
 import { NEW_THREAD, NEW_THREAD_ON_OPEN } from "./threads-data.js";
+import { PomeloRail } from "./pomelo/PomeloRail.js";
+import { railMountProps } from "./pomelo/rail-mount.js";
+import { subscribeThreadMeta, threadMetaSnapshot } from "./pomelo/thread-meta-store.js";
 
 /** `fresh`: a project just made, whose name box was never confirmed: Escape takes it away again. */
 type Renaming = { kind: "session" | "project"; id: string; fresh?: boolean } | null;
@@ -1386,6 +1389,7 @@ function AgentsList({ p }: { p: SidebarProps }) {
 // ── the sessions ────────────────────────────────────────────────────────────────────────────
 
 function SessionsList({ p }: { p: SidebarProps }) {
+  const threadMeta = useSyncExternalStore(subscribeThreadMeta, threadMetaSnapshot, threadMetaSnapshot);
   const [renaming, setRenaming] = useState<Renaming>(null);
   // Deleting a project is the one thing in this list that is not undoable, so it asks first.
   const [ask, confirmUI] = useConfirm();
@@ -1895,6 +1899,7 @@ function SessionsList({ p }: { p: SidebarProps }) {
 
   // The Team tab (Teammates.tsx): the sidebar is the team, not the sessions.
   if (teamTab && !isLocal()) return <div className="sb-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-1"><SidebarTeammates identity={p.identityForApi} onOpen={p.onOpen} activeSid={p.activeSid} needs={p.attention.items} marks={p.attention.needs} /></div>;
+  const pomeloRail = railMountProps(listed, threadMeta, p.activeSid, now, p.onOpen);
   return (
     <div
       ref={flip}
@@ -1926,6 +1931,7 @@ function SessionsList({ p }: { p: SidebarProps }) {
           onClose={() => setPanelCtx(null)}
         />
       )}
+      {pomeloRail && <PomeloRail {...pomeloRail} />}
       {needing.length > 0 && (
         <Group
           label={
