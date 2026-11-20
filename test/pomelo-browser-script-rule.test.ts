@@ -44,10 +44,36 @@ test("holds identifier escapes", () => {
   }
 });
 
+test("holds escaped bracket keys without decoding them", () => {
+  for (const script of [
+    String.raw`document["c\ookie"]`,
+    String.raw`window["f\etch"](target)`,
+    String.raw`el["v\alue"]`,
+    String.raw`document["\143ookie"]`,
+    'document["co\\\n' + 'okie"]',
+    'document["co\\\r\n' + 'okie"]',
+    "document[`c\\ookie`]",
+    "el[`v\\alue`]",
+  ]) {
+    assert.deepEqual(checkPageScript(script), { decision: "hold", reasons: ["computed-key"] });
+  }
+});
+
 test("holds ambiguous lexical syntax for review", () => {
   for (const script of ["/title/.test(document.title)", '"unfinished']) {
     assert.deepEqual(checkPageScript(script), { decision: "hold", reasons: ["unclear-syntax"] });
   }
+});
+
+test("finds refused code between regex literals that look like comment delimiters", () => {
+  assert.deepEqual(checkPageScript("/[/*]/; document.cookie; /[*/]/"), {
+    decision: "refuse",
+    reasons: ["cookies", "unclear-syntax"],
+  });
+  assert.deepEqual(checkPageScript("const pattern = /[/*]/; /* fetch(target) */ document.title"), {
+    decision: "hold",
+    reasons: ["unclear-syntax"],
+  });
 });
 
 test("holds scripts above 2000 characters", () => {

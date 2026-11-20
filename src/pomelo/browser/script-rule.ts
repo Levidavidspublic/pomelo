@@ -38,12 +38,15 @@ export const MAX_PAGE_SCRIPT_LENGTH = 2000;
 
 const NON_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]|\p{Cs}/u;
 const COMPUTED_KEY = /\b(?:document|window|globalThis|navigator)\s*(?:\)\s*)*(?:\?\.\s*)?\[(?!\s*(?:""|\d+)\s*\])/u;
+const ESCAPED_BRACKET_KEY = /\[\s*(?:\(\s*)*""\\+\s*(?:\)\s*)*\]/u;
 const IDENTIFIER_ESCAPE = /\\[ux]/u;
 
 // Refusal patterns also see literal text. Review patterns only see code and key shapes.
 function stripComments(script: string): { source: string; code: string; unclear: boolean } {
-  const codeToken = /(?<comment>\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?(?:\*\/|$)|^#![^\r\n\u2028\u2029]*)|(?<quoted>"(?:\\[\s\S]|[^"\\\r\n])*"|'(?:\\[\s\S]|[^'\\\r\n])*')|["'`{}]|\/(?=[^/\r\n\u2028\u2029]*\/)/gu;
+  const codeToken = /(?<comment>\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?(?:\*\/|$)|^#![^\r\n\u2028\u2029]*)|(?<quoted>"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n])*"|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n])*')|["'`{}]|\/(?=[^/\r\n\u2028\u2029]*\/)/gu;
   const templateToken = /\\[\s\S]|`|\$\{/gu;
+  const regexLiteral = /\/(?:\\[^\r\n\u2028\u2029]|\[(?:\\[^\r\n\u2028\u2029]|[^\]\\\r\n\u2028\u2029])*\]|[^/\\[\r\n\u2028\u2029])+\/[a-z]*/uy;
+  const expressionStart = /^\s*$|[([{=,:;!?]\s*$/u;
   const interpolationDepths: number[] = [];
   let inTemplate = false;
   let unclear = false;
@@ -71,6 +74,19 @@ function stripComments(script: string): { source: string; code: string; unclear:
       continue;
     }
 
+    if (token === "/" && expressionStart.test(code)) {
+      // Consume a regex as a unit so its character classes cannot start or end a comment.
+      regexLiteral.lastIndex = match.index;
+      const literal = regexLiteral.exec(script);
+      if (literal) {
+        source += literal[0];
+        code += token;
+        offset = regexLiteral.lastIndex;
+        unclear = true;
+        continue;
+      }
+    }
+
     source += token;
     if (inTemplate) {
       if (token === "`") inTemplate = false;
@@ -78,13 +94,10 @@ function stripComments(script: string): { source: string; code: string; unclear:
         interpolationDepths.push(1);
         inTemplate = false;
         code += " {";
-      } else if (IDENTIFIER_ESCAPE.test(token)) {
-        // An escaped template key needs review just like an escaped quoted key.
-        code += " escaped";
-      }
+      } else if (token.startsWith("\\")) code += "\\";
     } else if (match.groups?.quoted) {
-      // A plain literal bracket key is static. Review escaped keys without decoding them.
-      code += IDENTIFIER_ESCAPE.test(token) ? '"escaped"' : '""';
+      // Keep a marker after the placeholder for any quoted or template escape.
+      code += token.includes("\\") ? '""\\' : '""';
     } else if (token === "`") {
       code += '""';
       inTemplate = true;
@@ -119,7 +132,7 @@ export function checkPageScript(script: unknown): PageScriptResult {
   }
   const refused = reasons.length > 0;
 
-  if (COMPUTED_KEY.test(code)) reasons.push("computed-key");
+  if (COMPUTED_KEY.test(code) || ESCAPED_BRACKET_KEY.test(code)) reasons.push("computed-key");
   if (IDENTIFIER_ESCAPE.test(code)) reasons.push("identifier-escape");
   if (script.length > MAX_PAGE_SCRIPT_LENGTH) reasons.push("too-long");
   if (NON_TEXT.test(script)) reasons.push("not-text");
