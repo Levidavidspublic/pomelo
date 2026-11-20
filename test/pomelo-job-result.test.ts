@@ -7,6 +7,9 @@ import { HIDDEN } from "../src/secrets.js";
 
 const canary = ["pomelo-canary", '7f"3\\a', "ÿÿÿ", "91c2e5"].join("-");
 const noCut = { rows: 0, chars: 0 };
+const invalidResult = {
+  ok: false, code: "invalid-result", message: "The job must return nonempty text or a table with valid rows.",
+};
 
 test("small text and a three-column table come back unchanged", () => {
   const text = { kind: "text", text: " Three offers found. " };
@@ -33,22 +36,31 @@ test("Friday hides secret-shaped strings in text, column names and cells", () =>
 test("strings containing the browser mask keep only the marker", () => {
   const input = { kind: "table", columns: ["Value"], rows: [[MASK], [`${MASK} sample value`]] };
   assert.deepEqual(cleanJobResult(input), {
-    ok: true, result: { ...input, rows: [[MASK], [MASK]] }, cut: noCut,
+    ok: true, result: { ...input, rows: [[MASK], [MASK]] }, cut: noCut, note: "1 value hidden.",
   });
   assert.deepEqual(cleanJobResult({ kind: "text", text: `sample value ${MASK}` }), {
-    ok: true, result: { kind: "text", text: MASK }, cut: noCut,
+    ok: true, result: { kind: "text", text: MASK }, cut: noCut, note: "1 value hidden.",
   });
 });
 
-test("explicit cookie and password labels hide values without a recognizable token shape", () => {
-  for (const text of ["Cookie: sample=abc; other=xyz", '"set-cookie": "sample=abc"', "password=abc"]) {
+test("cookie and password assignments hide values and preserve surrounding findings", () => {
+  for (const [raw, cleaned] of [
+    ["Offer found. Cookie: sample=abc; other=xyz\nPrice: 3", `Offer found. Cookie: ${HIDDEN}\nPrice: 3`],
+    ['"set-cookie": "sample=abc"', `"set-cookie": "${HIDDEN}"`],
+    ["Offer found. Cookie=sample=abc; other=xyz", `Offer found. Cookie=${HIDDEN}`],
+    ["Price: 3, password=abc, in stock", `Price: 3, password=${HIDDEN}, in stock`],
+    ['Password: "abc def", Price: 3', `Password: ${HIDDEN}, Price: 3`],
+    ["Password: abc\nPrice: 3", `Password: ${HIDDEN}\nPrice: 3`],
+    ["Cookies: see the policy. Password: required for checkout.", "Cookies: see the policy. Password: required for checkout."],
+  ]) {
+    const text = `Findings\n${raw}\nEnd of findings`;
     assert.deepEqual(cleanJobResult({ kind: "text", text }), {
-      ok: true, result: { kind: "text", text: HIDDEN }, cut: noCut,
+      ok: true, result: { kind: "text", text: `Findings\n${cleaned}\nEnd of findings` }, cut: noCut,
     });
   }
   const table = { kind: "table", columns: ["Item", "Cookie", "Password"], rows: [["Orange", "sample=abc", 1234]] };
   assert.deepEqual(cleanJobResult(table), {
-    ok: true, result: { ...table, rows: [["Orange", HIDDEN, HIDDEN]] }, cut: noCut,
+    ok: true, result: { ...table, rows: [["Orange", HIDDEN, HIDDEN]] }, cut: noCut, note: "2 values hidden.",
   });
 });
 
@@ -69,7 +81,11 @@ test("the character cap drops complete rows, including small rows after a large 
   assert.deepEqual(cleanJobResult(input, { maxChars }), {
     ok: true, result: prefix, cut: { rows: 2, chars }, note: `2 rows and ${chars} characters omitted.`,
   });
-  assert.equal(cleanJobResult(input, { maxChars: 1 }).ok, false);
+  assert.deepEqual(cleanJobResult(input, { maxChars: 1 }), {
+    ok: false, code: "headers-too-large", message: "The job table headers exceed the size limit.",
+  });
+  assert.deepEqual(cleanJobResult(input, { maxChars: [...JSON.stringify({ ...input, rows: [] })].length }), invalidResult);
+  assert.deepEqual(cleanJobResult(input, { maxRows: 0 }), invalidResult);
 });
 
 test("text is cut at a whole Hebrew or emoji character, including combined characters", () => {
@@ -90,11 +106,10 @@ test("a cutoff leaves either a complete mask marker or none of it", () => {
   for (const marker of [MASK, HIDDEN]) {
     const input = { kind: "text", text: marker };
     assert.deepEqual(cleanJobResult(input, { maxChars: marker.length }), { ok: true, result: input, cut: noCut });
-    assert.deepEqual(cleanJobResult(input, { maxChars: marker.length - 1 }), {
-      ok: true, result: { kind: "text", text: "" }, cut: { rows: 0, chars: marker.length },
-      note: `${marker.length} characters omitted.`,
-    });
+    assert.deepEqual(cleanJobResult(input, { maxChars: marker.length - 1 }), invalidResult);
   }
+  assert.deepEqual(cleanJobResult({ kind: "text", text: "abcd" }, { maxChars: 0 }), invalidResult);
+  assert.deepEqual(cleanJobResult({ kind: "text", text: "  abcd" }, { maxChars: 2 }), invalidResult);
   assert.deepEqual(cleanJobResult({ kind: "text", text: `Item ${HIDDEN} found` }, { maxChars: 10 }), {
     ok: true, result: { kind: "text", text: "Item " }, cut: { rows: 0, chars: HIDDEN.length + 6 },
     note: `${HIDDEN.length + 6} characters omitted.`,
@@ -117,29 +132,37 @@ test("invalid shapes are refused even when the bad row would be cut", () => {
     { kind: "image" },
   ];
   for (const input of invalid) {
-    const result = cleanJobResult(input, { maxRows: 1 });
-    assert.equal(result.ok, false);
+    assert.deepEqual(cleanJobResult(input, { maxRows: 1 }), invalidResult);
   }
-  assert.equal(cleanJobResult({ kind: "table", columns: ["Item", "Price"], rows: [["Orange", 3]] }, { maxColumns: 1 }).ok, false);
+  assert.deepEqual(cleanJobResult({ kind: "table", columns: ["Item", "Price"], rows: [["Orange", 3]] }, { maxColumns: 1 }), {
+    ok: false, code: "too-many-columns", message: "The job table has too many columns.",
+  });
 });
 
 test("the serialized success and refusal shapes have zero canary hits", () => {
   const bytes = Buffer.from(canary);
   const forms = [
-    canary, encodeURIComponent(canary), bytes.toString("base64"), bytes.toString("hex"),
+    canary, encodeURIComponent(canary), bytes.toString("base64"), bytes.toString("hex"), bytes.toString("hex").toUpperCase(),
     JSON.stringify(canary).slice(1, -1), Buffer.from(`x${canary}suffix`).toString("base64url"),
   ];
   const options = { knownSecrets: [canary] };
   const table = cleanJobResult({ kind: "table", columns: forms, rows: [forms] }, options);
-  assert.ok(table.ok);
+  const hidden = forms.map(() => HIDDEN);
+  assert.deepEqual(table, {
+    ok: true, result: { kind: "table", columns: hidden, rows: [hidden] }, cut: noCut,
+    note: `${forms.length * 2} values hidden.`,
+  });
   assert.deepEqual(sweepForCanary(canary, { table: JSON.stringify(table) }), []);
   for (const form of forms) {
+    assert.ok(sweepForCanary(canary, { fixture: form }).length > 0);
     const text = cleanJobResult({ kind: "text", text: `Sample ${form}` }, options);
     const refused = cleanJobResult({ kind: form, text: form }, options);
     const badRow = cleanJobResult({ kind: "table", columns: [form], rows: [[form, form]] }, options);
-    assert.ok(text.ok);
-    assert.equal(refused.ok, false);
-    assert.equal(badRow.ok, false);
+    assert.deepEqual(text, {
+      ok: true, result: { kind: "text", text: HIDDEN }, cut: noCut, note: "1 value hidden.",
+    });
+    assert.deepEqual(refused, invalidResult);
+    assert.deepEqual(badRow, invalidResult);
     assert.deepEqual(sweepForCanary(canary, {
       text: JSON.stringify(text), refused: JSON.stringify(refused), badRow: JSON.stringify(badRow),
     }), []);
@@ -150,6 +173,6 @@ test("known secrets shorter than the canary minimum are also hidden", () => {
   const knownSecrets = ["a+3"];
   const text = Buffer.from(knownSecrets[0]).toString("base64");
   assert.deepEqual(cleanJobResult({ kind: "text", text }, { knownSecrets }), {
-    ok: true, result: { kind: "text", text: HIDDEN }, cut: noCut,
+    ok: true, result: { kind: "text", text: HIDDEN }, cut: noCut, note: "1 value hidden.",
   });
 });

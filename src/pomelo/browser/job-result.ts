@@ -26,7 +26,10 @@ const DEFAULT_MAX_COLUMNS = 12;
 const DEFAULT_MAX_ROWS = 50;
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const credentialLabel = /^(?:cookies?|set[ _-]cookie|password|passwd|passphrase|(?:proxy[ _-])?authorization)$/i;
-const credentialAssignment = /\b(?:cookies?|password|passwd|passphrase|authorization)\b["']?[^\S\r\n]*[:=]/i;
+// A cookie header starts with a name=value pair. A colon in prose alone is ambiguous.
+const cookieHeader = /(\b(?:set[ _-])?cookies?["']?[ \t]*[:=][ \t]*["']?)[^\s"'=;,:]+=[^\s"';,]*(?:;[ \t]*[^\s"'=;,:]+=[^\s"';,]*)*/gi;
+const credentialAssignment = /(\b(?:(?:set[ _-])?cookies?|password|passwd|passphrase|(?:proxy[ _-])?authorization)["']?[ \t]*=[ \t]*)(?:\[secret hidden\]|"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s"',;)}\]]+)/gi;
+const labeledPassword = /((?:^|[\s"',;({])(?:password|passwd|passphrase)["']?[ \t]*:[ \t]*)(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s"',;(){}\]]+(?=[ \t]*(?:$|[,;)}\]])))/gim;
 
 function limit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback;
@@ -82,11 +85,14 @@ function invalidResult(): CleanJobResult {
   return { ok: false, code: "invalid-result", message: "The job must return nonempty text or a table with valid rows." };
 }
 
-function success(result: JobResult, cut: JobResultCut): CleanJobResult {
+function success(result: JobResult, cut: JobResultCut, hiddenValues: number): CleanJobResult {
   const omissions: string[] = [];
   if (cut.rows > 0) omissions.push(`${cut.rows} ${cut.rows === 1 ? "row" : "rows"}`);
   if (cut.chars > 0) omissions.push(`${cut.chars} ${cut.chars === 1 ? "character" : "characters"}`);
-  return { ok: true, result, cut, ...(omissions.length > 0 ? { note: `${omissions.join(" and ")} omitted.` } : {}) };
+  const notes: string[] = [];
+  if (omissions.length > 0) notes.push(`${omissions.join(" and ")} omitted.`);
+  if (hiddenValues > 0) notes.push(`${hiddenValues} ${hiddenValues === 1 ? "value" : "values"} hidden.`);
+  return { ok: true, result, cut, ...(notes.length > 0 ? { note: notes.join(" ") } : {}) };
 }
 
 /** Prepare findings for the thread using only the supplied result and options. */
@@ -95,13 +101,22 @@ export function cleanJobResult(input: unknown, options: JobResultOptions = {}): 
 
   const maxChars = limit(options.maxChars, DEFAULT_MAX_CHARS);
   const forms = knownForms(options.knownSecrets ?? []);
+  let hiddenValues = 0;
+  function hideValue(value: JobResultCell, marker: string = HIDDEN): string {
+    if (value !== marker) hiddenValues++;
+    return marker;
+  }
+
   function cleanString(text: string, credential = false): string {
-    const shielded = hideSecretsIn(text);
-    if (text.includes(MASK)) return MASK;
-    if (credential || credentialAssignment.test(text)) return HIDDEN;
+    const shielded = hideSecretsIn(text
+      .replace(cookieHeader, "$1" + HIDDEN)
+      .replace(credentialAssignment, "$1" + HIDDEN)
+      .replace(labeledPassword, "$1" + HIDDEN));
+    if (text.includes(MASK)) return hideValue(text, MASK);
+    if (credential) return hideValue(text);
     // Remove the whole string on a known hit, including any partial base64 groups around an aligned hit.
     for (const form of forms) {
-      if (text.includes(form) || (shielded !== text && shielded.includes(form))) return HIDDEN;
+      if (text.includes(form) || (shielded !== text && shielded.includes(form))) return hideValue(text);
     }
     return shielded;
   }
@@ -109,7 +124,8 @@ export function cleanJobResult(input: unknown, options: JobResultOptions = {}): 
   if (input.kind === "text") {
     if (!("text" in input) || typeof input.text !== "string" || !input.text.trim()) return invalidResult();
     const { text, omitted } = cutText(cleanString(input.text), maxChars);
-    return success({ kind: "text", text }, { rows: 0, chars: omitted });
+    if (!text.trim()) return invalidResult();
+    return success({ kind: "text", text }, { rows: 0, chars: omitted }, hiddenValues);
   }
 
   if (input.kind !== "table" || !("columns" in input) || !("rows" in input)
@@ -120,10 +136,14 @@ export function cleanJobResult(input: unknown, options: JobResultOptions = {}): 
     return { ok: false, code: "too-many-columns", message: "The job table has too many columns." };
   }
 
-  const rawColumns: unknown[] = Array.from(input.columns);
-  if (!rawColumns.every((column) => typeof column === "string")) return invalidResult();
-  const columns = rawColumns.map((column) => cleanString(column));
-  const credentialColumns = rawColumns.map((column) => credentialLabel.test(column.trim()));
+  const columns: string[] = [];
+  const credentialColumns: boolean[] = [];
+  const rawColumns: unknown[] = input.columns;
+  for (const column of rawColumns) {
+    if (typeof column !== "string") return invalidResult();
+    columns.push(cleanString(column));
+    credentialColumns.push(credentialLabel.test(column.trim()));
+  }
   const rows: JobResultCell[][] = [];
   const result = { kind: "table", columns, rows } as const;
   let used = charCount(JSON.stringify(result));
@@ -136,22 +156,25 @@ export function cleanJobResult(input: unknown, options: JobResultOptions = {}): 
   const rawRows: unknown[] = input.rows;
   for (const rawRow of rawRows) {
     if (!Array.isArray(rawRow) || rawRow.length !== columns.length) return invalidResult();
+    const previouslyHidden = hiddenValues;
     const row: JobResultCell[] = [];
     for (const [index, cell] of rawRow.entries()) {
       const credential = credentialColumns[index];
       if (typeof cell === "string") row.push(cleanString(cell, credential));
       else if (typeof cell === "boolean" || (typeof cell === "number" && Number.isFinite(cell))) {
-        row.push(credential ? HIDDEN : cell);
+        row.push(credential ? hideValue(cell) : cell);
       } else return invalidResult();
     }
     const size = charCount(JSON.stringify(row)) + (rows.length + cut.rows > 0 ? 1 : 0);
     if (cut.rows > 0 || rows.length >= maxRows || used + size > maxChars) {
       cut.rows++;
       cut.chars += size;
+      hiddenValues = previouslyHidden;
     } else {
       rows.push(row);
       used += size;
     }
   }
-  return success(result, cut);
+  if (rows.length === 0) return invalidResult();
+  return success(result, cut, hiddenValues);
 }
