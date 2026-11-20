@@ -64,6 +64,26 @@ test("checks dynamic imports, require calls, side-effect imports, and re-exports
   ]);
 });
 
+test("reports wrapped imports and re-exports on the added line with the specifier", () => {
+  assert.deepEqual(importLayers([{
+    path: client,
+    added: [
+      { line: 2, text: "import {" },
+      { line: 3, text: "  list," },
+      { line: 4, text: '} from "../../pomelo/threads.js";' },
+      { line: 6, text: "export {" },
+      { line: 7, text: "  readFile," },
+      { line: 8, text: "} from 'node:fs';" },
+      { line: 12, text: '  } from "../../types.js";' },
+      { line: 16, text: '  } from "./rail-row.js";' },
+    ],
+  }]), [
+    { path: client, line: 4, rule: "client-server" },
+    { path: client, line: 8, rule: "client-node" },
+    { path: client, line: 12, rule: "client-server" },
+  ]);
+});
+
 test("allows client siblings, server helpers, and type-only client references to server modules", () => {
   assert.deepEqual(importLayers([
     {

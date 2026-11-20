@@ -41,12 +41,13 @@ const BARE_BUILTINS: readonly string[] = Object.freeze([
 
 const IMPORT = /(?<![\w$.])import\b(?:\s*(?<bindings>[\w${},*\s]+?)\s*\bfrom\b)?\s*(?<importQuote>["'])(?<importPath>[^"']+)\k<importQuote>/;
 const REEXPORT = /(?<![\w$.])export\b(?<exportType>\s+type\b)?\s*(?:\{[^}]*\}|\*(?:\s+as\s+[\w$]+)?)\s*from\s*(?<exportQuote>["'])(?<exportPath>[^"']+)\k<exportQuote>/;
+const WRAPPED_FROM = /^\s*\}\s*from\s*(?<wrappedQuote>["'])(?<wrappedPath>[^"']+)\k<wrappedQuote>/;
 const LOAD_CALL = /(?<![\w$.])(?:import|require)\s*\(\s*(?<callQuote>["'])(?<callPath>[^"']+)\k<callQuote>\s*(?=[,)])/;
 const COMMENT = /\/\/.*|\/\*.*?(?:\*\/|(?<unclosedComment>$))/;
 const STRING = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\x60(?:\\.|[^\x60\\])*\x60/;
 
 // Consume comments and strings as whole tokens before scanning any later code on the line.
-const LINE_TOKENS = new RegExp([COMMENT, STRING, IMPORT, REEXPORT, LOAD_CALL].map((pattern) => pattern.source).join("|"), "g");
+const LINE_TOKENS = new RegExp([COMMENT, STRING, IMPORT, REEXPORT, WRAPPED_FROM, LOAD_CALL].map((pattern) => pattern.source).join("|"), "g");
 
 function layerRule(path: string, client: boolean, specifier: string, typeOnly: boolean): LayerRule | undefined {
   if (client && (specifier.startsWith("node:") || BARE_BUILTINS.includes(specifier))) return "client-node";
@@ -71,7 +72,7 @@ function layerRule(path: string, client: boolean, specifier: string, typeOnly: b
   }
 }
 
-/** Check literal imports whose specifiers and import syntax appear on the same added line. */
+/** Check literal specifiers on added lines. Treat wrapped `} from` clauses as value imports. */
 export function importLayers(files: readonly ChangedFile[]): Finding[] {
   const findings: Finding[] = [];
 
@@ -96,7 +97,7 @@ export function importLayers(files: readonly ChangedFile[]): Finding[] {
 
       for (const { groups } of code.matchAll(LINE_TOKENS)) {
         if (groups?.unclosedComment !== undefined) openCommentLine = line;
-        const specifier = groups?.importPath ?? groups?.exportPath ?? groups?.callPath;
+        const specifier = groups?.importPath ?? groups?.exportPath ?? groups?.wrappedPath ?? groups?.callPath;
         if (!specifier) continue;
 
         const bindings = groups?.bindings?.trim() ?? "";
