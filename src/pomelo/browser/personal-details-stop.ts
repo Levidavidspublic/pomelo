@@ -29,12 +29,13 @@ export interface PersonalDetailsDecision {
 const AGE_CONFIRMATION = /\b(?:are you|i am|i['’]m|confirm (?:that )?you are|you must be) (?:(?:at least|over|older than|under|aged?) \d{2}\b|\d{2}(?:\+| years? (?:old|of age)\b| or (?:older|over)\b|[.!?]?$|\?))|(?:אני|האם את(?:ה|ם|ן)?) (?:מעל גיל|בגיל) \d{2}\b/u;
 const BIRTH_YEAR_PROMPT = /\b(?:enter|select|choose) (?:your |the )?(?:birth year|year of birth)\b/;
 const AGE_LABEL = /^(?:age (?:check|gate|verification)|verify your age|confirm your age|אימות גיל|בדיקת גיל)[.!?:]*$/u;
-const ID_LABEL = /\b(?:national[ -]+(?:id|identification|identity)|(?:id|identification|identity)[ -]+(?:card[ -]+)?(?:no\.?|number)|passport(?:[ -]+(?:no\.?|number))?)\b|תעודת זהות|(?:^|[^\p{L}\p{N}])ת\s*[.״׳"']\s*ז(?:$|[^\p{L}\p{N}])/u;
+const ID_LABEL = /\b(?:national[ -]+(?:id|identification|identity)|(?:id|identification|identity)[ -]+(?:card[ -]+)?(?:no\.?|number)|passport(?:[ -]+(?:no\.?|number))?|social[ -]+security[ -]+(?:no\.?|number)|ssn)\b|תעודת זהות|(?:^|[^\p{L}\p{N}])ת\s*[.״׳"']\s*ז(?:$|[^\p{L}\p{N}])/u;
 const BIRTH_LABEL = /\b(?:date[ -]+of[ -]+birth|birth[ -]*(?:date|day|month|year)|year[ -]+of[ -]+birth|d\.?o\.?b)\b|תאריך לידה|שנת לידה/u;
-const PHONE_LABEL = /\b(?:phone|telephone|cellphone|mobile number)\b|טלפון/u;
-const ADDRESS_LABEL = /\b(?:(?:street|home|residential|postal|mailing|shipping|billing) address|address(?: line)? [12]|street (?:name|number)|post[ -]*code|postal[ -]*code|zip(?:[ -]*code)?)\b|^(?:address|street)[\s:*]*$|כתובת מגורים|מיקוד/u;
+const PHONE_LABEL = /\b(?:phone|telephone|cellphone|mobile number)\b|^mobile[\s:*]*$|טלפון/u;
+const ADDRESS_LABEL = /\b(?:(?:street|home|residential|postal|mailing|shipping|billing) address|address(?: line)? [12]|street (?:name|number)|post[ -]*code|postal[ -]*code|zip(?:[ -]*code)?)\b|^(?:address|street|כתובת)[\s:*]*$|כתובת מגורים|מיקוד/u;
 const SEARCH_LABEL = /^(?:search\b|חיפוש)/u;
 const EMAIL_LABEL = /^(?:e-?mail(?: address)?|username|user name|שם משתמש|אימייל|דואר אלקטרוני)[\s:*]*$/u;
+const EMAIL_OR_PHONE_LABEL = /^e-?mail(?: address)? or (?:mobile(?: phone)?|phone|telephone)(?: number)?[\s:*]*$/;
 const PASSWORD_LABEL = /^(?:password|סיסמ[הא])[\s:*]*$/u;
 const SECRET_LABEL = /\b(?:card[ -]+(?:number|expiry|expiration|security code)|one[ -]+time[ -]+(?:code|password|passcode)|verification code|otp|cvv|cvc)\b|קוד אימות/u;
 const OPTIONAL_LABEL = /\boptional\b|אופציונלי/u;
@@ -77,7 +78,8 @@ function isPageRead(value: unknown): value is PersonalDetailsPageRead {
     && isList(value.items, isString);
 }
 
-type FieldKind = Exclude<PersonalDetailKind, "age-check"> | "search" | "email" | "password" | "typed-secret";
+type RequestedKind = PersonalDetailKind | "email-or-phone";
+type FieldKind = Exclude<RequestedKind, "age-check"> | "search" | "email" | "password" | "typed-secret";
 
 function fieldKind(label: string, type: string, hint: string | undefined): FieldKind | undefined {
   if (type === "search" || SEARCH_LABEL.test(label)) return "search";
@@ -85,6 +87,7 @@ function fieldKind(label: string, type: string, hint: string | undefined): Field
   if (hint === "one-time-code" || hint?.startsWith("cc-") || SECRET_LABEL.test(label)) return "typed-secret";
   if (/^bday(?:-day|-month|-year)?$/.test(hint ?? "") || BIRTH_LABEL.test(label)) return "date-of-birth";
   if (/^(?:street-address|address-line[1-3]|postal-code)$/.test(hint ?? "") || ADDRESS_LABEL.test(label)) return "address";
+  if (EMAIL_OR_PHONE_LABEL.test(label)) return "email-or-phone";
   if (/^tel(?:-[a-z]+)*$/.test(hint ?? "") || PHONE_LABEL.test(label)) return "phone";
   if (type === "password" || /^(?:current|new)-password$/.test(hint ?? "") || PASSWORD_LABEL.test(label)) return "password";
   if (type === "email" || hint === "username" || hint === "email" || EMAIL_LABEL.test(label)) return "email";
@@ -95,7 +98,7 @@ function agePrompt(label: string): boolean {
   return AGE_CONFIRMATION.test(label) || AGE_LABEL.test(label) || BIRTH_YEAR_PROMPT.test(label);
 }
 
-function requestedKind(label: string, kind: FieldKind | undefined): PersonalDetailKind | undefined {
+function requestedKind(label: string, kind: FieldKind | undefined): RequestedKind | undefined {
   if (kind === "search" || kind === "typed-secret") return;
   if (agePrompt(label)) return "age-check";
   if (kind !== "email" && kind !== "password") return kind;
@@ -109,7 +112,7 @@ export function personalDetailsStop(pageRead?: unknown): PersonalDetailsDecision
     const { title, text, fields = [], buttons = [], items = [] } = pageRead;
     const prompts = [normalize(title), normalize(text), ...buttons.map((button) =>
       normalize(isString(button) ? button : button.label))];
-    const kinds = new Set<PersonalDetailKind>();
+    const kinds = new Set<RequestedKind>();
     const fieldKinds: (FieldKind | undefined)[] = [];
     const unmatchedFields = fields.map((field) => ({ label: normalize(field.label), type: fieldType(field.type) }));
     let readable = prompts.some(Boolean);
@@ -152,7 +155,7 @@ export function personalDetailsStop(pageRead?: unknown): PersonalDetailsDecision
       // Friday can use the input value as a fallback label when it emits a value suffix.
       const label = filled ? "" : normalize(JSON.parse(match[2]));
       readable ||= Boolean(label || type);
-      if (ageControl && agePrompt(label)) kinds.add("age-check");
+      if (agePrompt(label)) kinds.add("age-check");
       if (!type || ageControl || NON_ENTRY_TYPE.test(type) || filled) continue;
 
       const known = unmatchedFields.findIndex((field) => label && field.label === label && (!field.type || field.type === type));
@@ -169,6 +172,9 @@ export function personalDetailsStop(pageRead?: unknown): PersonalDetailsDecision
 
     if (!readable) return unreadable;
     if (prompts.some(agePrompt)) kinds.add("age-check");
+    const hasPassword = fieldKinds.includes("password");
+    // In a sign-in form, the signed-out rule handles the alternate identifier.
+    if (kinds.delete("email-or-phone") && !hasPassword) kinds.add("phone");
     if (kinds.size) {
       return {
         action: "hold",
@@ -177,7 +183,8 @@ export function personalDetailsStop(pageRead?: unknown): PersonalDetailsDecision
       };
     }
     if (fieldKinds.includes("typed-secret")) return { action: "go", reason: "Card and one-time-code fields belong to the typed-secret rule.", kinds: [] };
-    if (fieldKinds.includes("email") && fieldKinds.includes("password") && fieldKinds.every((kind) => kind === "email" || kind === "password")) {
+    if (hasPassword && fieldKinds.some((kind) => kind === "email" || kind === "email-or-phone")
+      && fieldKinds.every((kind) => kind === "email" || kind === "email-or-phone" || kind === "password")) {
       return { action: "go", reason: "The sign-in form belongs to the signed-out rule.", kinds: [] };
     }
     if (fieldKinds.length && fieldKinds.every((kind) => kind === "search")) {

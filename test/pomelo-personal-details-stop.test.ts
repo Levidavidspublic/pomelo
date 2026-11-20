@@ -6,7 +6,7 @@ const requiredField = { type: "text", required: true, value: "" };
 
 for (const label of [
   "ID number", "Passport number", "תעודת זהות", "ת.ז", "  ＩＤ   ＮＵＭＢＥＲ  ",
-  "National ID card number", "Identity card number", "Identity number",
+  "National ID card number", "Identity card number", "Identity number", "Social security number",
 ]) {
   test(`holds for a required empty ${label} field`, () => {
     const result = personalDetailsStop({ fields: [{ ...requiredField, label }] });
@@ -78,6 +78,21 @@ test("holds for age gates in buttons, titles and text", () => {
   }
 });
 
+test("holds for an age gate made of Friday's numbered links", () => {
+  const result = personalDetailsStop({ items: [
+    '[1] link "I am over 18" → https://example.invalid/continue',
+    '[2] link "Exit" → https://example.invalid/exit',
+  ] });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.kinds, ["age-check"]);
+});
+
+test("ignores age-gate wording in a link destination", () => {
+  const result = personalDetailsStop({ items: ['[1] link "Continue" → https://example.invalid/#I am over 18'] });
+  assert.equal(result.action, "go");
+  assert.deepEqual(result.kinds, []);
+});
+
 test("lets the browser lane handle a search box", () => {
   const result = personalDetailsStop({ items: ['[1] field:search "Search by ID number"'] });
   assert.equal(result.action, "go");
@@ -92,6 +107,45 @@ test("defers an email and password sign-in form to the signed-out rule", () => {
   assert.equal(result.action, "go");
   assert.deepEqual(result.kinds, []);
   assert.match(result.reason, /signed-out rule/i);
+});
+
+test("defers an email-or-phone sign-in form to the signed-out rule", () => {
+  for (const read of [
+    { fields: [
+      { ...requiredField, type: "email", label: "Email or phone" },
+      { ...requiredField, type: "password", label: "Password" },
+    ] },
+    { items: ['[1] field:text "Email or phone"', '[2] field:password "Password"', '[3] button "Sign in"'] },
+  ]) {
+    const result = personalDetailsStop(read);
+    assert.equal(result.action, "go");
+    assert.deepEqual(result.kinds, []);
+    assert.match(result.reason, /signed-out rule/i);
+  }
+});
+
+test("holds when an email-or-phone field is the only credential field", () => {
+  const result = personalDetailsStop({ fields: [{ ...requiredField, type: "email", label: "Email or phone" }] });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.kinds, ["phone"]);
+});
+
+test("holds when a required phone-only field appears beside an email-or-phone sign-in", () => {
+  const result = personalDetailsStop({ fields: [
+    { ...requiredField, type: "email", label: "Email or phone" },
+    { ...requiredField, type: "password", label: "Password" },
+    { ...requiredField, type: "tel", label: "Phone number" },
+  ] });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.kinds, ["phone"]);
+});
+
+test("recognizes Mobile and the plain Hebrew address label", () => {
+  for (const [label, kind] of [["Mobile", "phone"], ["כתובת", "address"]]) {
+    const result = personalDetailsStop({ fields: [{ ...requiredField, label }] });
+    assert.equal(result.action, "hold");
+    assert.deepEqual(result.kinds, [kind]);
+  }
 });
 
 test("defers card and one-time-code fields to the typed-secret rule", () => {
