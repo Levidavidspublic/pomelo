@@ -86,6 +86,29 @@ test("later literal directory rules override or remove ownership without a trail
   assert.match(result.findings[1].reason, /ownership removed/i);
 });
 
+test("later wildcard directory rules override or remove ownership without a trailing slash", () => {
+  const text = [
+    `* ${owner}`,
+    "/.git* @another-example",
+    "docs/harn*",
+  ].join("\n");
+  const paths = [
+    ".github/workflows/ci.yml",
+    "docs/harness/sub/x.md",
+    "nested/.github/workflows/ci.yml",
+    "docs/other/harness/x.md",
+  ];
+  const result = checkCodeOwners(text, paths, owner);
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.findings.map(({ path, line }) => ({ path, line })), [
+    { path: paths[0], line: 2 },
+    { path: paths[1], line: 3 },
+  ]);
+  assert.match(result.findings[0].reason, /required owner/i);
+  assert.match(result.findings[1].reason, /ownership removed/i);
+});
+
 test("rejects a protected glob even when a broad rule has the required owner", () => {
   const text = `/.github/** ${owner}\n/.github/workflows @another-example`;
   const result = checkCodeOwners(text, [".github/**"], owner);

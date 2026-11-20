@@ -24,11 +24,11 @@ function compilePattern(pattern: string): RegExp | undefined {
     return last ? escaped : `${escaped}/`;
   }).join("");
 
-  // A literal last part may name either a file or a directory.
+  // A final `*` matches one level. Other final parts can also name a directory.
   let suffix = "";
   if (directory) {
     suffix = "/[\\s\\S]+";
-  } else if (!parts[parts.length - 1].includes("*")) {
+  } else if (parts[parts.length - 1] !== "*") {
     suffix = "(?:/[\\s\\S]+)?";
   }
   return new RegExp(`${start}${body}${suffix}$`);
