@@ -129,10 +129,15 @@ test("reads Windows and Unix line endings the same way", () => {
 test("stops for an unmasked token anywhere in the status without repeating any of it", () => {
   const fakeToken = "ghp_" + "Z9q7V6k4Y3w2U8r5S0n1M6a4K3i2X8b7C5d0";
   const active = account("'repo'");
+  const coloredToken = fakeToken.slice(0, 4) + "\x1b[31m" + fakeToken.slice(4) + "\x1b[0m";
   for (const input of [
     status(account("'repo', 'workflow'", { token: fakeToken })),
     status(active, account("'repo'", { token: fakeToken, active: false })),
     `  - Token: ${fakeToken}`,
+    status(active, fakeToken),
+    status(active, `  - Diagnostic: ${coloredToken}`),
+    status(account(`'repo', 'admin:${fakeToken}'`)),
+    fakeToken,
   ]) {
     const result = checkTokenScopes(input, opts);
     assert.deepEqual(result, { verdict: "stop", problems: ["token shown"] });
@@ -144,9 +149,21 @@ test("stops for an unmasked token anywhere in the status without repeating any o
   }
 });
 
-test("does not repeat a token-shaped value placed in the scopes field", () => {
-  const fakeToken = "ghp_" + "z9q7v6k4y3w2u8r5s0n1m6a4k3i2x8b7c5d0";
-  const result = checkTokenScopes(status(account(`'repo', 'admin:${fakeToken}'`)), opts);
-  assert.deepEqual(result, { verdict: "stop", problems: ["unknown scopes"] });
-  assert.equal(JSON.stringify(result).includes(fakeToken), false);
+test("blocks unrecognized scope names without repeating them", () => {
+  const secretLikeName = "z9q7v6k4y3w2u8r5s0n1m6a4k3i2x8b7c5d0";
+  assert.deepEqual(checkTokenScopes(status(account(`'repo', '${secretLikeName}'`)), opts), {
+    verdict: "stop",
+    problems: ["unknown scopes"],
+  });
+  assert.deepEqual(checkTokenScopes(status(account(`'repo', 'admin:${secretLikeName}', 'workflow'`)), opts), {
+    verdict: "stop",
+    problems: ["scope too wide: admin:", "scope too wide: workflow", "unknown scopes"],
+  });
+  assert.deepEqual(checkTokenScopes(status(account("'repo'")), {
+    ...opts,
+    neededScopes: [secretLikeName],
+  }), {
+    verdict: "stop",
+    problems: ["invalid required scope"],
+  });
 });
