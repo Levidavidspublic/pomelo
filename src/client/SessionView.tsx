@@ -78,6 +78,12 @@ import { cardShown, setCardWide, useThreadCard } from "./thread-card-store.js";
 const ThreadCard = lazy(() => import("./ThreadCard.js").then((m) => ({ default: m.ThreadCard })));
 const ThreadCardToggle = lazy(() => import("./ThreadCard.js").then((m) => ({ default: m.ThreadCardToggle })));
 import { folderName } from "./Workspace.js";
+import { useContext, useSyncExternalStore } from "react";
+import { ThreadsCtx } from "./threads-data.js";
+import { headerMountProps } from "./pomelo/header-mount.js";
+import { PomeloTagChips } from "./pomelo/PomeloTagChips.js";
+import { PomeloThreadOrigin } from "./pomelo/PomeloThreadOrigin.js";
+import { subscribeThreadMeta, threadMetaSnapshot } from "./pomelo/thread-meta-store.js";
 // Threads load on their own, after the session: the title stands in for their tabs until then (budget, client-bundle.test.ts).
 const ThreadTabs = lazy(() => import("./threads.js").then((m) => ({ default: m.ThreadTabs })));
 
@@ -905,6 +911,7 @@ export function SessionView({
     <FocusContext.Provider value={focusValue}>
     <div className={`session-view${focus ? " focus" : ""}`} data-slot="session">
       <TopBar
+        onOpenSession={onOpenSession}
         sessionPlan={sessionPlan}
         solo={solo}
         focus={focus}
@@ -1486,6 +1493,7 @@ function MateGear({ sid, on, onToggle }: { sid: string; on: boolean; onToggle: (
 }
 
 function TopBar({
+  onOpenSession,
   follow,
   strip,
   state,
@@ -1509,6 +1517,7 @@ function TopBar({
   solo,
   focus = false,
 }: {
+  onOpenSession?: (sid: string, path?: string) => void;
   /** Solo or Team for this session (null until known). */
   sessionPlan: SessionPlan | null;
   /** This session is Solo: worked out once, by the page. */
@@ -1588,6 +1597,9 @@ function TopBar({
     return () => clearTimeout(t);
   }, [conn]);
 
+  const threadMeta = useSyncExternalStore(subscribeThreadMeta, threadMetaSnapshot, threadMetaSnapshot);
+  const recents = useContext(ThreadsCtx)?.recents ?? [];
+  const pomeloHeader = headerMountProps(sid, threadMeta, recents, (session) => onOpenSession?.(session.sid));
   const left = (
       <div className={`tb-left${focus ? " focus" : ""}`}>
         <div className="tb-title" data-slot="session.title">
@@ -1623,6 +1635,12 @@ function TopBar({
           >
             {shownTitle}
           </h1>
+        )}
+        {pomeloHeader && (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 [overflow-wrap:anywhere] [&_a]:[-webkit-app-region:no-drag]">
+            {pomeloHeader.chips && <PomeloTagChips {...pomeloHeader.chips} />}
+            {pomeloHeader.origin && <PomeloThreadOrigin {...pomeloHeader.origin} />}
+          </div>
         )}
         {state.options.team && !editing && <TeamFaces sid={state.id} lead={state.lead ?? null} />}
         {/* Only when something needs a person. "Working" and "Idle" were a permanent
