@@ -29,9 +29,9 @@ test("stopping a thread cancels queued, running and waiting jobs with valid move
 
 test("stopping a fill or import adds a fixed note and keeps goal text out of the result", () => {
   const canary = "job-stop-fixture-canary";
-  const fill = { ...running, id: "fill", currentStep: "fill", goal: canary };
-  const importing = { ...running, id: "import", currentStep: "import" };
-  const read = { ...running, id: "read", currentStep: "read", steps: ["fill"] };
+  const fill = { ...running, id: "fill", lastStepKind: "fill", goal: canary };
+  const importing = { ...waiting, id: "import", lastStepKind: "import" };
+  const read = { ...running, id: "read", lastStepKind: "read", steps: ["fill"] };
   const result = jobStop([fill, importing, read], { kind: "thread" }, now);
   assert.deepEqual(result, {
     changes: [
@@ -43,6 +43,14 @@ test("stopping a fill or import adds a fixed note and keeps goal text out of the
   const finished = jobStop([{ ...fill, state: "done" }], { kind: "job", jobId: fill.id }, now);
   assert.equal(finished.reason, "Job already finished.");
   assert.ok(!JSON.stringify([result, finished]).includes(canary));
+});
+
+test("stopping a queued job omits the note for fill or import metadata", () => {
+  for (const lastStepKind of ["fill", "import"]) {
+    assert.deepEqual(jobStop([{ ...queued, lastStepKind }], { kind: "job", jobId: queued.id }, now), {
+      changes: [{ jobId: queued.id, status: "cancelled", endedAt: now }],
+    });
+  }
 });
 
 test("stopping an unknown or finished browser job returns its reason and no changes", () => {
@@ -65,9 +73,11 @@ test("a stop with an explicit thread ID leaves all jobs from another thread alon
   assert.deepEqual(jobStop([other, running], { kind: "job", threadId: running.threadId, jobId: other.id }, now), {
     changes: [], reason: "Unknown job.",
   });
-  const ambiguous = jobStop([running, other], { kind: "thread" }, now);
-  assert.deepEqual(ambiguous.changes, []);
-  assert.match(ambiguous.reason ?? "", /thread/i);
+  for (const request of [{ kind: "thread" }, { kind: "job", jobId: running.id }]) {
+    assert.deepEqual(jobStop([running, other], request, now), {
+      changes: [], reason: "Specify a thread for jobs from multiple threads.",
+    });
+  }
 });
 
 test("browser job stop leaves the input array and records intact", () => {
@@ -89,6 +99,7 @@ test("malformed browser job stop inputs return a reason and no changes", () => {
     [[running, null], request, now],
     [[running, { ...waiting, state: "stopping" }], request, now],
     [[running, { ...waiting, threadId: "" }], request, now],
+    [[running, { ...waiting, lastStepKind: 123 }], request, now],
     [[running, running], request, now],
     [[running], null, now],
     [[running], { kind: "job" }, now],

@@ -37,9 +37,9 @@ export function jobStop(jobs: unknown, request: unknown, now: number): JobStopRe
     let reason = kind === "job" ? "Unknown job." : undefined;
     for (const job of jobs) {
       if (!isRecord(job)) return invalidJobs;
-      const { id, threadId: jobThreadId, state, currentStep } = job;
+      const { id, threadId: jobThreadId, state, lastStepKind } = job;
       if (!isId(id) || !isId(jobThreadId) || seenIds.has(id) ||
-          (currentStep != null && typeof currentStep !== "string")) return invalidJobs;
+          (lastStepKind != null && typeof lastStepKind !== "string")) return invalidJobs;
       seenIds.add(id);
 
       const finished = isFinal(state);
@@ -57,8 +57,10 @@ export function jobStop(jobs: unknown, request: unknown, now: number): JobStopRe
       }
 
       const change: JobChange = { jobId: id, status: "cancelled", endedAt: now };
-      if (currentStep === "fill") change.note = "stopped mid-fill";
-      if (currentStep === "import") change.note = "stopped mid-import";
+      if (state === "running" || state === "waiting") {
+        if (lastStepKind === "fill") change.note = "stopped mid-fill";
+        if (lastStepKind === "import") change.note = "stopped mid-import";
+      }
       changes.push(change);
       reason = undefined;
     }
