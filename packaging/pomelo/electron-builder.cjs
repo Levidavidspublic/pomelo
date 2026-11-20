@@ -2,6 +2,7 @@ const base = require("../../package.json").build;
 
 module.exports = {
   ...base,
+  publish: null,
   productName: "Pomelo",
   appId: "com.levidavidspublic.pomelo",
   extraMetadata: {
