@@ -29,8 +29,10 @@ export interface TermsDecision {
 }
 
 const LEGAL_WORDING = /\b(?:terms (?:of (?:service|use)|and conditions)|(?:new|updated|revised|our|the|accept|agree to) (?:terms|conditions)(?! of\b)|conditions of (?:use|service|sale)|contracts?|agreements?|subscriptions?)\b|\bterms\s*&\s*conditions\b|^(?:terms|conditions|תנאים)$|תנאי (?:השימוש|שימוש|השירות|שירות)|תנאים (?:והגבלות|חדשים|מעודכנים)|התקנון|הסכם|חוזה|מינוי|מנוי/u;
+const LEGAL_HEADING = /^(?:terms (?:of (?:service|use)|(?:and|&) conditions)|privacy policy|service (?:contract|agreement)|תנאי (?:השימוש|השירות)|תנאים והגבלות|מדיניות (?:הפרטיות|פרטיות))$/u;
 const PRIVACY_WORDING = /\bprivacy polic(?:y|ies)\b|מדיניות (?:הפרטיות|פרטיות)/u;
 const PRIVACY_ACCEPTANCE = /\b(?:accept|agree to) (?:(?:the|our|this|new|updated|revised) )*privacy polic(?:y|ies)\b|(?:מאשר|מסכים|לאשר|להסכים) (?:את |ל)?מדיניות (?:הפרטיות|פרטיות)/u;
+const PRIVACY_UPDATE = /\b(?:(?:new|updated|revised|changed) (?:our |the |this )?privacy polic(?:y|ies)|privacy polic(?:y|ies) (?:has (?:been )?|was )?(?:changed|updated|revised))\b|מדיניות (?:הפרטיות|פרטיות) (?:החדשה|המעודכנת|עודכנה)|עדכנ(?:ו|ה) (?:את )?מדיניות (?:הפרטיות|פרטיות)/u;
 const ACCEPTANCE_PROMPT = /\b(?:accept|agree to|consent to|acknowledge|(?:updat|chang|revis)(?:e|ed|ing))\b|כדי להמשיך|לאשר|להסכים|עדכנ/u;
 const PLAN_CHANGE = /\b(?:(?:new|paid) (?:plan|subscription)|(?:plan|subscription) (?:change|upgrade|downgrade)|(?:change|upgrade|downgrade) (?:to |your |the )*(?:plan|subscription))\b/;
 const BILLING = /[$€£₪]\s*\d|\d[\d.,]*\s*(?:[$€£₪]|\b(?:usd|eur|gbp|ils)\b)|\b(?:paid plan|billed|billing|charged|per month|per year)\b|\/\s*(?:month|year)\b/u;
@@ -90,14 +92,19 @@ function contextsFor(control: AgreementControl, label: string, title: string, li
       ...lines.slice(index + 1, index + 1 + windowSize)].filter(Boolean).join("\n")]
     : []);
   if (neighbors.length) return neighbors;
-  // When the flat read lists a control separately, its position is unknown.
-  // Use the title and visible text after the caller has filtered out link-only lines.
-  return [[title, ...lines].filter(Boolean).join("\n")];
+  // In a longer flat read, an unplaced control needs evidence of an actual prompt.
+  const planChange = [label, title, ...lines].some((line) => PLAN_CHANGE.test(line));
+  const fallback = lines.length <= windowSize ? lines : lines.filter((line) =>
+    LEGAL_HEADING.test(line) || (LEGAL_WORDING.test(line) && ACCEPTANCE_PROMPT.test(line)) || privacyPrompt(line)
+    || PLAN_CHANGE.test(line) || (planChange && BILLING.test(line)) || COOKIE_WORDING.test(line),
+  );
+  return [[title, ...fallback].filter(Boolean).join("\n")];
 }
 
 function checkboxSignal(label: string): string | undefined {
-  if (/^i agree\b/.test(label)) return "I agree";
-  if (/^i accept\b/.test(label)) return "I accept";
+  const assent = /^(?:by (?:ticking|checking|selecting) this box,? )?i (?:(?:have )?read and )?(agree|accept)\b/.exec(label)?.[1];
+  if (assent === "agree") return "I agree";
+  if (assent === "accept") return "I accept";
   if (/^אני מסכי(?:ם|מה)(?:$|\s)/u.test(label)) return "אני מסכים";
   if (/^אני מאשר(?:ת)?(?:$|\s)/u.test(label)) return "אני מאשר";
   return undefined;
@@ -117,6 +124,15 @@ function buttonSignal(label: string): string | undefined {
       if (/^agree to\b/.test(label) && (LEGAL_WORDING.test(label) || PRIVACY_WORDING.test(label))) return "Agree";
       return checkboxSignal(label);
   }
+}
+
+function privacyPrompt(text: string): boolean {
+  return PRIVACY_ACCEPTANCE.test(text) || PRIVACY_UPDATE.test(text);
+}
+
+function legalAgreement(label: string, context: string, cookieChoice = false): boolean {
+  return LEGAL_WORDING.test(label) || context.split("\n").some((line) => LEGAL_WORDING.test(line))
+    || PRIVACY_WORDING.test(label) || privacyPrompt(context) || (!cookieChoice && PRIVACY_WORDING.test(context));
 }
 
 /** Classify masked page facts for the browser job's human handoff. */
@@ -139,6 +155,11 @@ export function termsStop(pageRead?: unknown): TermsDecision {
   const lines = text.split(/\r?\n/).map(normalize)
     .filter((line) => line && !FOOTER_LINKS.test(line) && !linkLabels.has(line));
   const pageTitle = normalize(title);
+  const hasCheckedAgreement = checkboxes.some((control) => {
+    const label = normalize(control.label);
+    return control.checked && checkboxSignal(label) !== undefined
+      && contextsFor(control, label, pageTitle, lines).some((context) => legalAgreement(label, context));
+  });
   const controls = [
     ...checkboxes.filter(({ checked }) => !checked).map((control) => ({ control, match: checkboxSignal, canHold: true })),
     ...allButtons.map((control: AgreementButton) => ({ control, match: buttonSignal, canHold: control.blocksPage !== false })),
@@ -152,16 +173,15 @@ export function termsStop(pageRead?: unknown): TermsDecision {
     const signal = match(label);
     for (const context of contextsFor(control, label, pageTitle, lines)) {
       const wording = [label, context].filter(Boolean).join("\n");
-      const cookie = COOKIE_WORDING.test(wording);
-      if (cookie && COOKIE_CHOICE.test(label)) cookieBanner = true;
+      const cookieChoice = COOKIE_CHOICE.test(label) && COOKIE_WORDING.test(wording);
+      if (cookieChoice) cookieBanner = true;
       if (!canHold || !signal) continue;
 
       const paidChange = PLAN_CHANGE.test(wording) && BILLING.test(wording);
+      const continuesCheckedAgreement = signal === "Continue" && hasCheckedAgreement;
       if (signal === "Confirm" && !paidChange) continue;
-      if (signal === "Continue" && !paidChange && !ACCEPTANCE_PROMPT.test(context)) continue;
-      // A banner can mention its privacy policy without asking the reader to agree to it.
-      if (paidChange || wording.split("\n").some((line) => LEGAL_WORDING.test(line))
-        || PRIVACY_WORDING.test(label) || PRIVACY_ACCEPTANCE.test(context) || (!cookie && PRIVACY_WORDING.test(context))) {
+      if (signal === "Continue" && !paidChange && !continuesCheckedAgreement && !ACCEPTANCE_PROMPT.test(context)) continue;
+      if (paidChange || continuesCheckedAgreement || legalAgreement(label, context, cookieChoice)) {
         signals.add(signal);
       }
     }

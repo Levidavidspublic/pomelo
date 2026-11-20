@@ -23,6 +23,17 @@ test("holds an unticked acceptance checkbox beside legal wording", () => {
   }
 });
 
+test("holds unticked agreement checkboxes with introductory wording", () => {
+  for (const [label, signal] of [
+    ["I have read and agree to the Terms of Service", "I agree"],
+    ["By ticking this box I accept the service contract", "I accept"],
+  ]) {
+    const result = termsStop({ checkboxes: [{ label, checked: false }] });
+    assert.equal(result.action, "hold", label);
+    assert.deepEqual(result.signals, [signal]);
+  }
+});
+
 test("holds an Accept and continue button beneath updated terms", () => {
   const result = termsStop({
     title: "Account notice",
@@ -59,6 +70,10 @@ test("holds a blocking button reported separately from a legal heading and two p
   });
   assert.equal(result.action, "hold");
   assert.deepEqual(result.signals, ["Accept and continue"]);
+  assert.equal(termsStop({
+    text: "Terms of Service\nPlease read the details.\nThis applies to all accounts.\nChanges take effect next month.",
+    buttons: [{ label: "Accept and continue" }],
+  }).action, "hold");
 });
 
 test("holds the Hebrew agreement buttons beside Hebrew terms", () => {
@@ -97,6 +112,10 @@ test("distinguishes continuing past a legal prompt from ordinary navigation", ()
     text: "Choose a layout\nConfirm",
     buttons: [{ label: "Confirm" }],
   }).action, "go");
+  assert.equal(termsStop({
+    text: "Your subscription is billed monthly.\nProduct survey\nDo you find the guide useful?\nChoose a response.",
+    buttons: [{ label: "Agree" }],
+  }).action, "go");
 });
 
 test("goes on a page with only footer terms links", () => {
@@ -125,6 +144,26 @@ test("defers cookie and tracking consent banners to the cookie-banner rule", () 
   assert.match(result.signals.join(" "), /cookie-banner rule/i);
 });
 
+test("holds a privacy policy update that mentions cookies", () => {
+  for (const label of ["Accept and continue", "Agree"]) {
+    const result = termsStop({
+      text: "We have updated our Privacy Policy to explain how we use cookies.",
+      buttons: [{ label }],
+    });
+    assert.equal(result.action, "hold", label);
+    assert.deepEqual(result.signals, [label]);
+  }
+});
+
+test("holds a privacy policy update alongside a separate cookie banner", () => {
+  const result = termsStop({
+    text: "We use cookies.\nAccept all\nReject\nWe have updated our Privacy Policy to explain how we use cookies.",
+    buttons: [{ label: "Accept all" }, { label: "Reject" }, { label: "Accept and continue" }],
+  });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.signals, ["Accept and continue"]);
+});
+
 test("holds legal agreement even when the page also has a cookie banner", () => {
   const result = termsStop({
     text: "We use cookies.\nAccept all\nReject\nWe have updated our terms\nAccept and continue",
@@ -144,6 +183,18 @@ test("goes when an agreement is already checked and no blocking button is presen
     buttons: [{ label: "Agree", blocksPage: false, nearbyText: "Terms of Service" }],
   });
   assert.equal(result.action, "go");
+});
+
+test("holds a blocking Continue when a legal agreement is already checked", () => {
+  const checkboxes = [{ label: "I agree to the Terms of Service", checked: true }];
+  const result = termsStop({
+    text: "Review and save\nContinue",
+    checkboxes,
+    buttons: [{ label: "Continue" }],
+  });
+  assert.equal(result.action, "hold");
+  assert.deepEqual(result.signals, ["Continue"]);
+  assert.equal(termsStop({ checkboxes, buttons: [{ label: "Continue", blocksPage: false }] }).action, "go");
 });
 
 test("keeps a synthetic canary from the title, visible text, and control label out of the result", () => {
